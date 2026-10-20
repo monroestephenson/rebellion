@@ -39,6 +39,13 @@ needs to be.
 - **Robust charset handling** for legacy German pages (→ UTF-8).
 - **Headless-browser rendering** via the pre-detected Chromium, including
   optional PNG **screenshots**.
+- **Interactive browser sessions**: drive a live page step by step — click,
+  fill forms, submit, scroll, wait for elements, run JS — and read back the
+  rendered DOM / Markdown / screenshots.
+- **Persistent authenticated profiles**: reuse a Chromium user-data-dir so
+  cookies and logins survive across runs.
+- **Proxy rotation**: a configurable proxy pool (round-robin / random /
+  sticky-per-host) applied to both the HTTP and browser engines.
 - **Crawling** (same-site BFS with depth/limit and include/exclude regex) and
   **mapping** (fast URL discovery from `sitemap.xml` + homepage links).
 - **Polite by default**: obeys `robots.txt`, honors `Crawl-delay`, and
@@ -116,6 +123,16 @@ rebellion crawl https://example.de --include '/blog/' --exclude '/tag/'
 
 # Discover URLs fast (sitemaps + homepage links)
 rebellion map https://example.de
+
+# Browser actions: interact before capturing (imply --browser, run in order)
+rebellion scrape https://shop.de --click '#accept-cookies' --scroll-bottom
+rebellion scrape https://app.de --fill '#q=laptop' --submit '#search-form' \
+  --wait-for '.results'
+
+# Proxy rotation + a persistent (authenticated) profile
+rebellion scrape https://example.de \
+  --proxy http://user:pass@p1:3128 --proxy http://user:pass@p2:3128 \
+  --proxy-strategy sticky --profile ~/.rebellion/profile
 ```
 
 Run `rebellion --help` for the full option list.
@@ -165,6 +182,35 @@ cc my.c -Ibuild/../include -Lbuild -lrebellion -lcurl -o my
 See [`examples/`](examples/) for a complete program, and
 [`include/rebellion/rebellion.h`](include/rebellion/rebellion.h) for the full
 API (scrape, crawl, map, JSON serialization, screenshots).
+
+### Interactive sessions, proxies & authenticated profiles
+
+```c
+/* A persistent profile keeps cookies/logins across runs. */
+rbl_client_config cfg;
+rbl_client_config_init(&cfg);
+cfg.browser_profile_dir = "/var/lib/myapp/profile";
+rbl_client *c = rbl_client_new(&cfg);
+
+/* A rotating proxy pool (used by both engines). */
+const char *pool[] = {"http://user:pass@p1:3128", "socks5h://p2:1080"};
+rbl_client_set_proxies(c, pool, 2, RBL_PROXY_STICKY_HOST);
+
+/* Drive a live page: search a form, wait, capture clean Markdown. */
+rbl_status st;
+rbl_session *s = rbl_session_open(c, NULL, &st);
+rbl_session_goto(s, "https://app.example/search", -1);
+rbl_session_fill(s, "input[name=q]", "laptops");
+rbl_session_submit(s, "form#search");
+rbl_session_wait_for(s, ".results", 10000);
+rbl_session_scroll_to_bottom(s);
+
+rbl_doc *d = rbl_session_scrape(s, NULL);     /* markdown/links/metadata */
+puts(rbl_doc_markdown(d));
+rbl_doc_free(d);
+rbl_session_close(s);
+rbl_client_free(c);
+```
 
 ## How it works
 

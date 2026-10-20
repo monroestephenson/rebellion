@@ -102,6 +102,12 @@ typedef struct rbl_client_config {
      * link-local and CGNAT addresses are refused with RBL_ERR_BLOCKED.
      * Enable to scrape internal/localhost hosts you control. */
     bool allow_private_networks;
+
+    /* Persistent browser profile directory (Chromium user-data-dir). When
+     * set, the headless browser reuses it across runs, so cookies and logins
+     * persist — "authenticated profiles". NULL => a throwaway profile that is
+     * deleted after each render. */
+    const char *browser_profile_dir;
 } rbl_client_config;
 
 void rbl_client_config_init(rbl_client_config *cfg);
@@ -111,6 +117,20 @@ typedef struct rbl_client rbl_client;
 /* Create a client. Pass NULL for all-defaults. Returns NULL on OOM. */
 rbl_client *rbl_client_new(const rbl_client_config *cfg);
 void        rbl_client_free(rbl_client *c);
+
+/* ---- proxy rotation ------------------------------------------------- */
+typedef enum {
+    RBL_PROXY_ROUND_ROBIN = 0, /* cycle through the pool, request by request */
+    RBL_PROXY_RANDOM,          /* pick a random proxy each request           */
+    RBL_PROXY_STICKY_HOST      /* same proxy for a given target host          */
+} rbl_proxy_strategy;
+
+/* Install a proxy pool used for all subsequent requests (HTTP engine and the
+ * headless browser). Each entry is a curl-style proxy URL, e.g.
+ * "http://user:pass@host:3128" or "socks5h://host:1080". Pass n==0 to clear.
+ * Copies the strings. Overrides any proxy from the environment. */
+rbl_status rbl_client_set_proxies(rbl_client *c, const char *const *proxies,
+                                  size_t n, rbl_proxy_strategy strategy);
 
 /* ---- documents ------------------------------------------------------ */
 typedef struct rbl_doc rbl_doc;
@@ -176,6 +196,58 @@ typedef struct rbl_strlist {
 rbl_status rbl_map(rbl_client *c, const char *seed_url, int max_urls,
                    rbl_strlist *out);
 void rbl_strlist_free(rbl_strlist *l);
+
+/* ---- interactive browser sessions ----------------------------------- */
+/* A long-lived headless-browser session you can drive step by step:
+ * navigate, click, fill forms, scroll, wait for elements, run JS, and read
+ * the rendered DOM / screenshots. State (cookies, page) persists across calls
+ * for the life of the session; combine with browser_profile_dir for logins
+ * that persist across sessions. Requires a Chromium binary. */
+typedef struct rbl_session rbl_session;
+
+typedef struct rbl_session_opts {
+    const char *proxy;           /* override the client's proxy for this session */
+    const char *user_agent;
+    const char *accept_language;
+    const char *profile_dir;     /* override client browser_profile_dir          */
+    long timeout_ms;             /* default per-action budget (0 => 45000)       */
+} rbl_session_opts;
+
+void rbl_session_opts_init(rbl_session_opts *opts);
+
+/* Open a session (launches the browser). NULL on failure; sets *out_status. */
+rbl_session *rbl_session_open(rbl_client *c, const rbl_session_opts *opts,
+                              rbl_status *out_status);
+void rbl_session_close(rbl_session *s);
+
+/* Navigate and wait for load; settle_ms is extra quiet time (<0 => default). */
+rbl_status rbl_session_goto(rbl_session *s, const char *url, long settle_ms);
+
+/* Actions (CSS selectors). Each returns RBL_OK, RBL_ERR_PARSE if the selector
+ * matches nothing, or a transport/render error. */
+rbl_status rbl_session_click(rbl_session *s, const char *selector);
+rbl_status rbl_session_fill(rbl_session *s, const char *selector,
+                            const char *value);
+rbl_status rbl_session_submit(rbl_session *s, const char *form_selector);
+rbl_status rbl_session_scroll(rbl_session *s, int dx, int dy);
+rbl_status rbl_session_scroll_to_bottom(rbl_session *s);
+rbl_status rbl_session_wait_for(rbl_session *s, const char *selector,
+                                long timeout_ms);
+rbl_status rbl_session_wait_ms(rbl_session *s, long ms);
+
+/* Evaluate JavaScript; *out_result (may be NULL) receives a heap string of
+ * the (stringified) result. Caller frees. */
+rbl_status rbl_session_eval(rbl_session *s, const char *js, char **out_result);
+
+/* Current state (heap allocations; caller frees unless noted). */
+char *rbl_session_html(rbl_session *s);                 /* live outerHTML       */
+unsigned char *rbl_session_screenshot(rbl_session *s, bool full_page,
+                                      size_t *out_len); /* PNG bytes            */
+const char *rbl_session_url(rbl_session *s);            /* owned by session     */
+
+/* Build a document (markdown/links/metadata) from the session's current page,
+ * honoring opts (engine field is ignored). Caller frees with rbl_doc_free. */
+rbl_doc *rbl_session_scrape(rbl_session *s, const rbl_scrape_opts *opts);
 
 #ifdef __cplusplus
 }

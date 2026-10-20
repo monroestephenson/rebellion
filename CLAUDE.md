@@ -47,6 +47,14 @@ clang, so keep the tree warning-clean under `-Wall -Wextra -Wshadow`.
 See the "Project layout" section of `README.md`. Orchestration is in
 `src/scrape.c` (`rbl_scrape_ex`), crawling/mapping in `src/crawl.c`.
 
+Interactive browser sessions (`rbl_session_*`: goto/click/fill/submit/scroll/
+wait/eval/screenshot) live in `src/browser.c`; the one-shot `rbl_browser_render`
+is built on top of them. Proxy-pool selection is in `src/client.c`
+(`rbl_client_pick_proxy`), wired into `src/http.c` (CURLOPT_PROXY) and the
+browser launch (`--proxy-server`). Persistent profiles come from
+`browser_profile_dir` (not deleted on close). Out of scope by policy:
+CAPTCHA/anti-bot solving.
+
 ## Notes
 
 - The headless engine needs a Chromium binary; detection is in `src/client.c`

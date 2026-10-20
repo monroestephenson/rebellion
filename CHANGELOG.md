@@ -7,6 +7,28 @@ follow [Semantic Versioning](https://semver.org/) from 1.0 onward.
 ## [Unreleased]
 
 ### Added
+- **Interactive browser sessions** (`rbl_session_*`): open a long-lived
+  headless-browser session and drive it — `goto`, `click`, `fill`, `submit`,
+  `scroll`/`scroll_to_bottom`, `wait_for`, `wait_ms`, `eval` — then read back
+  the live DOM (`rbl_session_html`), a screenshot, or a full document
+  (`rbl_session_scrape`). CLI: ordered `--wait-for/--click/--fill/--submit/
+  --scroll-bottom/--wait` actions on `scrape`.
+- **Persistent authenticated profiles**: `browser_profile_dir` /
+  `--profile <dir>` reuses a Chromium user-data-dir so cookies and logins
+  persist across runs (throwaway profiles are still the default and are
+  cleaned up).
+- **Proxy rotation**: `rbl_client_set_proxies()` installs a pool with
+  round-robin / random / sticky-per-host selection, applied to both the HTTP
+  engine (`CURLOPT_PROXY`) and the browser (`--proxy-server`). CLI: repeatable
+  `--proxy` plus `--proxy-strategy`.
+- The one-shot `rbl_browser_render` is now implemented on top of sessions.
+
+### Fixed
+- base64 decode no longer relies on signed-integer overflow (UBSan clean).
+- Chromium no longer forces loopback targets through the configured proxy, so
+  local/internal hosts render correctly.
+
+### Added (earlier in this cycle)
 - **Security / SSRF guard** (on by default): refuse loopback, private,
   link-local, CGNAT and unspecified/multicast targets — both literal hosts
   and DNS names that resolve into them (via a libcurl pre-request hook that

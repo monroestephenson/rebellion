@@ -45,6 +45,17 @@ static const char TARGET_BODY[] =
     "mit ausreichend L\xE4nge f\xFCr die Hauptinhalts-Erkennung.</p></article>"
     "</body></html>";
 
+/* Interactive page for the browser-session test: a form that, on submit,
+ * rewrites the heading; plus a tall spacer and a lazily-revealed marker. */
+static const char INTERACTIVE_BODY[] =
+    "<!DOCTYPE html><html lang=\"de\"><head><title>Interaktiv</title></head>"
+    "<body><h1 id=\"title\">START</h1>"
+    "<input id=\"q\">"
+    "<button id=\"go\" onclick=\"document.getElementById('title').textContent="
+    "'TREFFER:'+document.getElementById('q').value\">Suchen</button>"
+    "<div style=\"height:3000px\">spacer</div>"
+    "<p id=\"deep\">TIEFENINHALT</p></body></html>";
+
 /* --- the server ------------------------------------------------------ */
 
 typedef struct {
@@ -99,6 +110,9 @@ static void handle(int fd) {
     } else if (strcmp(path, "/latin1") == 0) {
         respond(fd, "200 OK", "text/html; charset=ISO-8859-1", NULL, HOME_BODY,
                 sizeof(HOME_BODY) - 1);
+    } else if (strcmp(path, "/interactive") == 0) {
+        respond(fd, "200 OK", "text/html; charset=UTF-8", NULL, INTERACTIVE_BODY,
+                sizeof(INTERACTIVE_BODY) - 1);
     } else if (strcmp(path, "/robots.txt") == 0) {
         const char *r = "User-agent: *\nDisallow: /secret\n";
         respond(fd, "200 OK", "text/plain", NULL, r, strlen(r));
@@ -166,6 +180,59 @@ static rbl_client *make_client(void) {
     cfg.allow_private_networks = true; /* we are hitting 127.0.0.1 */
     cfg.min_delay_ms = 0;              /* no need to rate-limit the test */
     return rbl_client_new(&cfg);
+}
+
+/* Browser session: fill a field, click, verify DOM mutation, scroll, wait for
+ * a lazily-reached element, screenshot. Skipped (no failures) when no Chromium
+ * is available — so CI without a browser still passes. */
+static void test_browser_actions(const char *base) {
+    rbl_client_config cfg;
+    rbl_client_config_init(&cfg);
+    cfg.allow_private_networks = true;
+    rbl_client *c = rbl_client_new(&cfg);
+    if (!c) return;
+
+    rbl_status st;
+    rbl_session *s = rbl_session_open(c, NULL, &st);
+    if (!s) {
+        if (st == RBL_ERR_UNSUPPORTED)
+            fprintf(stderr, "  (browser session test skipped: no Chromium)\n");
+        else
+            fprintf(stderr, "  (browser session test skipped: %s)\n", rbl_strerror(st));
+        rbl_client_free(c);
+        return;
+    }
+
+    char url[128];
+    snprintf(url, sizeof(url), "%s/interactive", base);
+    CHECK(rbl_session_goto(s, url, 300) == RBL_OK);
+
+    CHECK(rbl_session_fill(s, "#q", "laptop") == RBL_OK);
+    CHECK(rbl_session_click(s, "#go") == RBL_OK);
+
+    char *title = NULL;
+    rbl_session_eval(s, "document.getElementById('title').textContent", &title);
+    CHECK_STREQ(title, "TREFFER:laptop");
+    free(title);
+
+    /* a selector that does not exist fails cleanly */
+    CHECK(rbl_session_click(s, "#does-not-exist") == RBL_ERR_PARSE);
+
+    CHECK(rbl_session_scroll_to_bottom(s) == RBL_OK);
+    CHECK(rbl_session_wait_for(s, "#deep", 2000) == RBL_OK);
+    CHECK(rbl_session_wait_for(s, "#never", 400) == RBL_ERR_TIMEOUT);
+
+    char *html = rbl_session_html(s);
+    CHECK(html && strstr(html, "TREFFER:laptop"));
+    free(html);
+
+    size_t plen = 0;
+    unsigned char *png = rbl_session_screenshot(s, false, &plen);
+    CHECK(png != NULL && plen > 8); /* PNG signature + data */
+    free(png);
+
+    rbl_session_close(s);
+    rbl_client_free(c);
 }
 
 void test_integration(void) {
@@ -277,6 +344,9 @@ void test_integration(void) {
     CHECK(d == NULL);
     CHECK(st == RBL_ERR_BLOCKED);
     rbl_client_free(c2);
+
+    /* 7) interactive browser session (skipped if no Chromium) */
+    test_browser_actions(base);
 
     server_stop(&s);
 }

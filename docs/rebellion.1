@@ -58,8 +58,41 @@ Minimum delay between hits to one host.
 .B \-\-screenshot \fIfile\fR
 Save a PNG screenshot (implies the browser engine).
 .TP
+.B \-\-proxy \fIurl\fR
+Proxy URL (e.g. \fBhttp://user:pass@host:3128\fR or \fBsocks5h://host:1080\fR).
+Repeat to build a rotating pool; overrides any proxy from the environment.
+.TP
+.B \-\-proxy\-strategy \fIs\fR
+How to pick from the pool: \fBround\-robin\fR (default), \fBrandom\fR, or
+\fBsticky\fR (same proxy per target host).
+.TP
+.B \-\-profile \fIdir\fR
+Persistent browser profile directory. Cookies and logins are kept across
+runs, so a session can reuse an authenticated profile.
+.TP
 .BR \-\-verbose ", " \-v
 Log progress to stderr.
+.SH "BROWSER ACTIONS"
+For \fBscrape\fR, these run in order against a live headless browser before the
+page is captured (they imply the browser engine):
+.TP
+.B \-\-wait\-for \fIselector\fR
+Wait until a CSS selector appears.
+.TP
+.B \-\-click \fIselector\fR
+Click the first matching element.
+.TP
+.B \-\-fill \fIselector=value\fR
+Type a value into a form field.
+.TP
+.B \-\-submit \fIselector\fR
+Submit a form (or the field's/button's form).
+.TP
+.B \-\-scroll\-bottom
+Scroll to the bottom of the page (to trigger lazy loading).
+.TP
+.B \-\-wait \fIms\fR
+Pause for the given number of milliseconds.
 .SH "CRAWL OPTIONS"
 .TP
 .B \-\-limit \fIn\fR

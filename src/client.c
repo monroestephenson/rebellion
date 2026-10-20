@@ -105,6 +105,7 @@ rbl_client *rbl_client_new(const rbl_client_config *cfg_in) {
     for (int i = 0; i < CURL_LOCK_DATA_LAST; i++)
         pthread_mutex_init(&c->share_mtx[i], NULL);
     pthread_mutex_init(&c->host_lock, NULL);
+    pthread_mutex_init(&c->proxy_lock, NULL);
 
     c->share = curl_share_init();
     if (c->share) {
@@ -129,6 +130,7 @@ void rbl_client_free(rbl_client *c) {
     for (int i = 0; i < CURL_LOCK_DATA_LAST; i++)
         pthread_mutex_destroy(&c->share_mtx[i]);
     pthread_mutex_destroy(&c->host_lock);
+    pthread_mutex_destroy(&c->proxy_lock);
     rbl_host_state *h = c->hosts;
     while (h) {
         rbl_host_state *next = h->next;
@@ -137,10 +139,70 @@ void rbl_client_free(rbl_client *c) {
         free(h);
         h = next;
     }
+    for (size_t i = 0; i < c->proxy_count; i++) free(c->proxies[i]);
+    free(c->proxies);
     free(c->ua);
     free(c->accept_language);
     free(c->chromium_path);
     free(c);
+}
+
+rbl_status rbl_client_set_proxies(rbl_client *c, const char *const *proxies, size_t n,
+                                  rbl_proxy_strategy strategy) {
+    if (!c) return RBL_ERR_INVALID_ARG;
+    char **copy = NULL;
+    if (n > 0) {
+        copy = (char **)calloc(n, sizeof(char *));
+        if (!copy) return RBL_ERR_OOM;
+        for (size_t i = 0; i < n; i++) {
+            copy[i] = rbl_strdup(proxies[i] ? proxies[i] : "");
+            if (!copy[i]) {
+                for (size_t j = 0; j < i; j++) free(copy[j]);
+                free(copy);
+                return RBL_ERR_OOM;
+            }
+        }
+    }
+    pthread_mutex_lock(&c->proxy_lock);
+    for (size_t i = 0; i < c->proxy_count; i++) free(c->proxies[i]);
+    free(c->proxies);
+    c->proxies = copy;
+    c->proxy_count = n;
+    c->proxy_strategy = strategy;
+    c->proxy_cursor = 0;
+    pthread_mutex_unlock(&c->proxy_lock);
+    return RBL_OK;
+}
+
+static unsigned long djb2(const char *s) {
+    unsigned long h = 5381;
+    for (; s && *s; s++) h = ((h << 5) + h) + (unsigned char)*s;
+    return h;
+}
+
+char *rbl_client_pick_proxy(rbl_client *c, const char *host) {
+    if (!c) return NULL;
+    char *chosen = NULL;
+    pthread_mutex_lock(&c->proxy_lock);
+    if (c->proxy_count > 0) {
+        size_t idx = 0;
+        switch (c->proxy_strategy) {
+        case RBL_PROXY_RANDOM:
+            idx = (size_t)rand() % c->proxy_count;
+            break;
+        case RBL_PROXY_STICKY_HOST:
+            idx = (size_t)(djb2(host) % c->proxy_count);
+            break;
+        case RBL_PROXY_ROUND_ROBIN:
+        default:
+            idx = c->proxy_cursor % c->proxy_count;
+            c->proxy_cursor++;
+            break;
+        }
+        chosen = rbl_strdup(c->proxies[idx]);
+    }
+    pthread_mutex_unlock(&c->proxy_lock);
+    return chosen;
 }
 
 rbl_host_state *rbl_client_host(rbl_client *c, const char *host) {

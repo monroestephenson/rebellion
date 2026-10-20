@@ -265,6 +265,21 @@ rbl_doc *rbl_scrape(rbl_client *c, const char *url, const rbl_scrape_opts *opts)
     return rbl_scrape_ex(c, url, opts, NULL);
 }
 
+rbl_doc *rbl_session_scrape(rbl_session *s, const rbl_scrape_opts *opts) {
+    if (!s) return NULL;
+    char *html = rbl_session_html(s);
+    if (!html) return NULL;
+    const char *url = rbl_session_url(s);
+    rbl_scrape_opts o;
+    if (opts)
+        o = *opts;
+    else
+        rbl_scrape_opts_init(&o);
+    rbl_doc *d = doc_from_html(html, strlen(html), url ? url : "", 200, "browser", &o);
+    free(html);
+    return d;
+}
+
 /* ---- doc accessors -------------------------------------------------- */
 
 void rbl_doc_free(rbl_doc *d) {

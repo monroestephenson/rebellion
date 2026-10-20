@@ -28,7 +28,18 @@ struct rbl_client {
 
     rbl_host_state *hosts; /* linked list, guarded by host_lock */
     pthread_mutex_t host_lock;
+
+    /* Proxy pool (guarded by proxy_lock). */
+    char **proxies;
+    size_t proxy_count;
+    rbl_proxy_strategy proxy_strategy;
+    size_t proxy_cursor; /* round-robin position */
+    pthread_mutex_t proxy_lock;
 };
+
+/* Pick a proxy for a request to `host` (may be NULL), per the pool strategy,
+ * or NULL if no pool is configured. Returns an owned copy the caller frees. */
+char *rbl_client_pick_proxy(rbl_client *c, const char *host);
 
 /* Look up (creating if needed) the per-host state. Caller must hold nothing;
  * this takes host_lock internally and returns a stable pointer (entries are

@@ -1,6 +1,7 @@
 #include "browser.h"
 #include "internal.h"
 #include "json.h"
+#include "net.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -476,26 +477,39 @@ static char *cdp_screenshot(ws_conn *w, bool full_page, long timeout_ms,
 
 typedef struct {
     pid_t pid;
-    char profile_dir[256];
+    char profile_dir[512];
+    bool owns_profile; /* true => created a throwaway dir, delete on close */
 } browser_proc;
 
-static void make_profile_dir(char *out, size_t n) {
-    const char *base = getenv("TMPDIR");
-    if (!base || !*base) base = "/tmp";
-    snprintf(out, n, "%s/rebellion-XXXXXX", base);
-    char *d = mkdtemp(out);
-    if (!d) snprintf(out, n, "%s/rebellion-%d", base, (int)getpid());
-}
+typedef struct {
+    const char *ua;
+    const char *al;
+    const char *proxy;       /* NULL => fall back to env proxy          */
+    const char *profile_dir; /* NULL => throwaway temp profile          */
+} launch_opts;
 
 static void rm_rf(const char *path); /* fwd */
 
-static bool launch_chromium(rbl_client *c, const rbl_render_opts *o, browser_proc *bp) {
-    make_profile_dir(bp->profile_dir, sizeof(bp->profile_dir));
+static bool launch_chromium(rbl_client *c, const launch_opts *o, browser_proc *bp) {
+    if (o->profile_dir && *o->profile_dir) {
+        /* Persistent profile: create if needed, keep it on close. */
+        mkdir(o->profile_dir, 0700); /* ok if it already exists */
+        snprintf(bp->profile_dir, sizeof(bp->profile_dir), "%s", o->profile_dir);
+        bp->owns_profile = false;
+    } else {
+        const char *base = getenv("TMPDIR");
+        if (!base || !*base) base = "/tmp";
+        snprintf(bp->profile_dir, sizeof(bp->profile_dir), "%s/rebellion-XXXXXX", base);
+        if (!mkdtemp(bp->profile_dir))
+            snprintf(bp->profile_dir, sizeof(bp->profile_dir), "%s/rebellion-%d", base,
+                     (int)getpid());
+        bp->owns_profile = true;
+    }
 
-    const char *ua = o->user_agent ? o->user_agent : c->ua;
-    const char *al = o->accept_language ? o->accept_language : c->accept_language;
+    const char *ua = o->ua ? o->ua : c->ua;
+    const char *al = o->al ? o->al : c->accept_language;
 
-    char ua_arg[1024], al_arg[256], dir_arg[320], lang_arg[128];
+    char ua_arg[1024], al_arg[256], dir_arg[576], lang_arg[128];
     snprintf(ua_arg, sizeof(ua_arg), "--user-agent=%s", ua);
     /* Accept-Language header: first token of the list. */
     char al_first[64];
@@ -507,9 +521,10 @@ static bool launch_chromium(rbl_client *c, const rbl_render_opts *o, browser_pro
     snprintf(lang_arg, sizeof(lang_arg), "--lang=%s", al_first);
     snprintf(dir_arg, sizeof(dir_arg), "--user-data-dir=%s", bp->profile_dir);
 
-    char *proxy = getenv("HTTPS_PROXY");
-    if (!proxy) proxy = getenv("https_proxy");
-    char proxy_arg[512] = {0};
+    const char *proxy = o->proxy;
+    if (!proxy || !*proxy) proxy = getenv("HTTPS_PROXY");
+    if (!proxy || !*proxy) proxy = getenv("https_proxy");
+    char proxy_arg[1024] = {0};
     if (proxy && *proxy)
         snprintf(proxy_arg, sizeof(proxy_arg), "--proxy-server=%s", proxy);
 
@@ -535,7 +550,9 @@ static bool launch_chromium(rbl_client *c, const rbl_render_opts *o, browser_pro
     argv[a++] = dir_arg;
     if (proxy_arg[0]) {
         argv[a++] = proxy_arg;
-        argv[a++] = "--proxy-bypass-list=<-loopback>";
+        /* Keep loopback/localhost direct (Chromium's default), so a local
+         * target isn't forced through the proxy. */
+        argv[a++] = "--proxy-bypass-list=localhost;127.0.0.1;[::1]";
     }
     argv[a++] = "about:blank";
     argv[a] = NULL;
@@ -561,7 +578,7 @@ static bool launch_chromium(rbl_client *c, const rbl_render_opts *o, browser_pro
 
 /* Read the DevTools port from <profile>/DevToolsActivePort. */
 static int read_devtools_port(const char *profile_dir, long timeout_ms) {
-    char path[320];
+    char path[600];
     snprintf(path, sizeof(path), "%s/DevToolsActivePort", profile_dir);
     long long deadline = rbl_now_ms() + timeout_ms;
     while (rbl_now_ms() < deadline) {
@@ -597,7 +614,8 @@ static void kill_browser(browser_proc *bp) {
             waitpid(bp->pid, NULL, 0);
         }
     }
-    if (bp->profile_dir[0]) rm_rf(bp->profile_dir);
+    /* Only delete throwaway profiles; persistent ones are kept for reuse. */
+    if (bp->owns_profile && bp->profile_dir[0]) rm_rf(bp->profile_dir);
 }
 
 static int rm_entry(const char *path, const struct stat *sb, int typeflag,
@@ -642,7 +660,277 @@ static char *find_page_ws(int port, long timeout_ms) {
     return NULL;
 }
 
-/* ---- public entry --------------------------------------------------- */
+/* ---- session ------------------------------------------------------- */
+
+struct rbl_session {
+    rbl_client *client;
+    browser_proc bp;
+    ws_conn ws;
+    long timeout_ms;
+    char *current_url;
+    bool open;
+};
+
+static rbl_status session_connect(rbl_session *s) {
+    int port = read_devtools_port(s->bp.profile_dir, 12000);
+    if (port <= 0) {
+        rbl_logf("browser: no devtools port");
+        return RBL_ERR_RENDER;
+    }
+    rbl_logf("browser: devtools on port %d", port);
+
+    char *wsurl = find_page_ws(port, 8000);
+    if (!wsurl) {
+        rbl_logf("browser: no page target");
+        return RBL_ERR_RENDER;
+    }
+    int wsport = port;
+    char *path = ws_parse(wsurl, &wsport);
+    free(wsurl);
+
+    s->ws.fd = tcp_connect_local(wsport, 5000);
+    if (s->ws.fd < 0) {
+        free(path);
+        return RBL_ERR_RENDER;
+    }
+    sockrd_init(&s->ws.rd, s->ws.fd);
+    bool hs = ws_handshake(&s->ws, wsport, path, 5000);
+    free(path);
+    if (!hs) {
+        rbl_logf("browser: ws handshake failed");
+        return RBL_ERR_RENDER;
+    }
+    cdp_call_simple(&s->ws, "Page.enable", 5000);
+    cdp_call_simple(&s->ws, "Runtime.enable", 5000);
+    return RBL_OK;
+}
+
+void rbl_session_opts_init(rbl_session_opts *o) {
+    memset(o, 0, sizeof(*o));
+    o->timeout_ms = 45000;
+}
+
+rbl_session *rbl_session_open(rbl_client *c, const rbl_session_opts *in,
+                              rbl_status *out) {
+    rbl_status st = RBL_ERR_RENDER;
+    if (!c || !rbl_browser_available(c)) {
+        if (out) *out = RBL_ERR_UNSUPPORTED;
+        return NULL;
+    }
+    rbl_session_opts o;
+    if (in)
+        o = *in;
+    else
+        rbl_session_opts_init(&o);
+
+    rbl_session *s = (rbl_session *)calloc(1, sizeof(*s));
+    if (!s) {
+        if (out) *out = RBL_ERR_OOM;
+        return NULL;
+    }
+    s->client = c;
+    s->ws.fd = -1;
+    s->bp.pid = -1;
+    s->timeout_ms = o.timeout_ms > 0 ? o.timeout_ms : 45000;
+
+    char *proxy = o.proxy ? rbl_strdup(o.proxy) : rbl_client_pick_proxy(c, NULL);
+    const char *profile = o.profile_dir ? o.profile_dir : c->cfg.browser_profile_dir;
+    launch_opts lo = {o.user_agent, o.accept_language, proxy, profile};
+    bool launched = launch_chromium(c, &lo, &s->bp);
+    free(proxy);
+    if (!launched) {
+        st = RBL_ERR_RENDER;
+        goto fail;
+    }
+    st = session_connect(s);
+    if (st != RBL_OK) goto fail;
+
+    s->open = true;
+    if (out) *out = RBL_OK;
+    return s;
+
+fail:
+    rbl_session_close(s);
+    if (out) *out = st;
+    return NULL;
+}
+
+void rbl_session_close(rbl_session *s) {
+    if (!s) return;
+    if (s->ws.fd >= 0) close(s->ws.fd);
+    kill_browser(&s->bp);
+    free(s->current_url);
+    free(s);
+}
+
+const char *rbl_session_url(rbl_session *s) {
+    return s ? s->current_url : NULL;
+}
+
+rbl_status rbl_session_goto(rbl_session *s, const char *url, long settle_ms) {
+    if (!s || !s->open || !url) return RBL_ERR_INVALID_ARG;
+    if (!s->client->cfg.allow_private_networks && rbl_url_host_is_private(url)) {
+        rbl_logf("SSRF guard: refusing private host in %s", url);
+        return RBL_ERR_BLOCKED;
+    }
+    long budget = s->timeout_ms;
+    long settle = settle_ms >= 0 ? settle_ms : 500;
+    long long nav_deadline = rbl_now_ms() + budget;
+    if (!cdp_navigate(&s->ws, url, budget)) return RBL_ERR_RENDER;
+
+    for (;;) {
+        long remain = (long)(nav_deadline - rbl_now_ms());
+        if (remain <= 0) break;
+        char *rs = cdp_eval_string(&s->ws, "document.readyState",
+                                   remain < 3000 ? remain : 3000);
+        bool complete = rs && strcmp(rs, "complete") == 0;
+        free(rs);
+        if (complete) break;
+        rbl_sleep_ms(150);
+    }
+    rbl_sleep_ms(settle);
+
+    char *cur = cdp_eval_string(&s->ws, "location.href", 5000);
+    if (cur) {
+        free(s->current_url);
+        s->current_url = cur;
+    }
+    return RBL_OK;
+}
+
+/* Run a JS snippet expected to return 'OK' / 'NOTFOUND'. */
+static rbl_status run_action(rbl_session *s, rbl_buf *js) {
+    char *r = cdp_eval_string(&s->ws, rbl_buf_cstr(js), s->timeout_ms);
+    rbl_buf_free(js);
+    if (!r) return RBL_ERR_RENDER;
+    rbl_status st = strcmp(r, "OK") == 0
+                        ? RBL_OK
+                        : (strcmp(r, "NOTFOUND") == 0 ? RBL_ERR_PARSE : RBL_ERR_RENDER);
+    free(r);
+    return st;
+}
+
+rbl_status rbl_session_click(rbl_session *s, const char *selector) {
+    if (!s || !s->open || !selector) return RBL_ERR_INVALID_ARG;
+    rbl_buf js;
+    rbl_buf_init(&js);
+    rbl_buf_append_str(&js, "(function(){var e=document.querySelector(");
+    rbl_json_quote(&js, selector);
+    rbl_buf_append_str(&js, ");if(!e)return 'NOTFOUND';"
+                            "e.scrollIntoView({block:'center'});e.click();"
+                            "return 'OK';})()");
+    return run_action(s, &js);
+}
+
+rbl_status rbl_session_fill(rbl_session *s, const char *selector, const char *value) {
+    if (!s || !s->open || !selector) return RBL_ERR_INVALID_ARG;
+    rbl_buf js;
+    rbl_buf_init(&js);
+    rbl_buf_append_str(&js, "(function(){var e=document.querySelector(");
+    rbl_json_quote(&js, selector);
+    rbl_buf_append_str(&js, ");if(!e)return 'NOTFOUND';e.focus();var v=");
+    rbl_json_quote(&js, value ? value : "");
+    rbl_buf_append_str(&js, ";if('value' in e){e.value=v;}else{e.textContent=v;}"
+                            "e.dispatchEvent(new Event('input',{bubbles:true}));"
+                            "e.dispatchEvent(new Event('change',{bubbles:true}));"
+                            "return 'OK';})()");
+    return run_action(s, &js);
+}
+
+rbl_status rbl_session_submit(rbl_session *s, const char *selector) {
+    if (!s || !s->open || !selector) return RBL_ERR_INVALID_ARG;
+    rbl_buf js;
+    rbl_buf_init(&js);
+    rbl_buf_append_str(&js, "(function(){var e=document.querySelector(");
+    rbl_json_quote(&js, selector);
+    rbl_buf_append_str(
+        &js, ");if(!e)return 'NOTFOUND';"
+             "if(e.tagName==='FORM'){e.requestSubmit?e.requestSubmit():e.submit();}"
+             "else if(e.form){e.form.requestSubmit?e.form.requestSubmit(e):"
+             "e.form.submit();}else{e.click();}return 'OK';})()");
+    return run_action(s, &js);
+}
+
+rbl_status rbl_session_scroll(rbl_session *s, int dx, int dy) {
+    if (!s || !s->open) return RBL_ERR_INVALID_ARG;
+    rbl_buf js;
+    rbl_buf_init(&js);
+    rbl_buf_appendf(&js, "(function(){window.scrollBy(%d,%d);return 'OK';})()", dx, dy);
+    return run_action(s, &js);
+}
+
+rbl_status rbl_session_scroll_to_bottom(rbl_session *s) {
+    if (!s || !s->open) return RBL_ERR_INVALID_ARG;
+    rbl_buf js;
+    rbl_buf_init(&js);
+    rbl_buf_append_str(&js, "(function(){window.scrollTo(0,Math.max("
+                            "document.body?document.body.scrollHeight:0,"
+                            "document.documentElement.scrollHeight));"
+                            "return 'OK';})()");
+    return run_action(s, &js);
+}
+
+rbl_status rbl_session_wait_for(rbl_session *s, const char *selector, long timeout_ms) {
+    if (!s || !s->open || !selector) return RBL_ERR_INVALID_ARG;
+    long long deadline = rbl_now_ms() + (timeout_ms > 0 ? timeout_ms : s->timeout_ms);
+    for (;;) {
+        rbl_buf js;
+        rbl_buf_init(&js);
+        rbl_buf_append_str(&js, "(function(){return document.querySelector(");
+        rbl_json_quote(&js, selector);
+        rbl_buf_append_str(&js, ")?'yes':'no';})()");
+        char *r = cdp_eval_string(&s->ws, rbl_buf_cstr(&js), 2000);
+        rbl_buf_free(&js);
+        bool found = r && strcmp(r, "yes") == 0;
+        free(r);
+        if (found) return RBL_OK;
+        if (rbl_now_ms() >= deadline) return RBL_ERR_TIMEOUT;
+        rbl_sleep_ms(150);
+    }
+}
+
+rbl_status rbl_session_wait_ms(rbl_session *s, long ms) {
+    if (!s || !s->open) return RBL_ERR_INVALID_ARG;
+    rbl_sleep_ms(ms);
+    return RBL_OK;
+}
+
+rbl_status rbl_session_eval(rbl_session *s, const char *js, char **out_result) {
+    if (out_result) *out_result = NULL;
+    if (!s || !s->open || !js) return RBL_ERR_INVALID_ARG;
+    /* Coerce the result to a string so numbers/booleans come back too. */
+    rbl_buf expr;
+    rbl_buf_init(&expr);
+    rbl_buf_append_str(&expr, "String(");
+    rbl_buf_append_str(&expr, js);
+    rbl_buf_append_str(&expr, ")");
+    char *r = cdp_eval_string(&s->ws, rbl_buf_cstr(&expr), s->timeout_ms);
+    rbl_buf_free(&expr);
+    if (!r) return RBL_ERR_RENDER;
+    if (out_result)
+        *out_result = r;
+    else
+        free(r);
+    return RBL_OK;
+}
+
+char *rbl_session_html(rbl_session *s) {
+    if (!s || !s->open) return NULL;
+    return cdp_eval_string(
+        &s->ws, "document.documentElement ? document.documentElement.outerHTML : ''",
+        15000);
+}
+
+unsigned char *rbl_session_screenshot(rbl_session *s, bool full_page, size_t *out_len) {
+    if (out_len) *out_len = 0;
+    if (!s || !s->open) return NULL;
+    size_t pl = 0;
+    char *png = cdp_screenshot(&s->ws, full_page, 20000, &pl);
+    if (out_len) *out_len = pl;
+    return (unsigned char *)png;
+}
+
+/* ---- one-shot render (built on a session) --------------------------- */
 
 rbl_status rbl_browser_render(rbl_client *c, const char *url,
                               const rbl_render_opts *opts, char **out_html,
@@ -654,102 +942,43 @@ rbl_status rbl_browser_render(rbl_client *c, const char *url,
     if (out_png_len) *out_png_len = 0;
     if (!rbl_browser_available(c)) return RBL_ERR_UNSUPPORTED;
 
-    long budget = opts->timeout_ms > 0 ? opts->timeout_ms : 45000;
-    long settle = opts->settle_ms >= 0 ? opts->settle_ms : 800;
+    rbl_session_opts so;
+    rbl_session_opts_init(&so);
+    so.user_agent = opts->user_agent;
+    so.accept_language = opts->accept_language;
+    so.timeout_ms = opts->timeout_ms > 0 ? opts->timeout_ms : 45000;
 
-    browser_proc bp;
-    memset(&bp, 0, sizeof(bp));
-    bp.pid = -1;
-    if (!launch_chromium(c, opts, &bp)) return RBL_ERR_RENDER;
+    rbl_status st = RBL_ERR_RENDER;
+    rbl_session *s = rbl_session_open(c, &so, &st);
+    if (!s) return st;
 
-    rbl_status result = RBL_ERR_RENDER;
-    ws_conn w;
-    memset(&w, 0, sizeof(w));
-    w.fd = -1;
-
-    int port = read_devtools_port(bp.profile_dir, 12000);
-    if (port <= 0) {
-        rbl_logf("browser: no devtools port");
-        goto cleanup;
-    }
-    rbl_logf("browser: devtools on port %d", port);
-
-    char *wsurl = find_page_ws(port, 8000);
-    if (!wsurl) {
-        rbl_logf("browser: no page target");
-        goto cleanup;
+    st = rbl_session_goto(s, url, opts->settle_ms >= 0 ? opts->settle_ms : 800);
+    if (st != RBL_OK) {
+        rbl_session_close(s);
+        return st;
     }
 
-    int wsport = port;
-    char *path = ws_parse(wsurl, &wsport);
-    free(wsurl);
-
-    w.fd = tcp_connect_local(wsport, 5000);
-    if (w.fd < 0) {
-        free(path);
-        goto cleanup;
-    }
-    sockrd_init(&w.rd, w.fd);
-    bool hs = ws_handshake(&w, wsport, path, 5000);
-    free(path);
-    if (!hs) {
-        rbl_logf("browser: ws handshake failed");
-        goto cleanup;
-    }
-
-    cdp_call_simple(&w, "Page.enable", 5000);
-    cdp_call_simple(&w, "Runtime.enable", 5000);
-
-    long long nav_deadline = rbl_now_ms() + budget;
-    if (!cdp_navigate(&w, url, budget)) {
-        rbl_logf("browser: navigate failed");
-        goto cleanup;
-    }
-
-    /* Poll document.readyState until complete or budget exhausted. */
-    for (;;) {
-        long remain = (long)(nav_deadline - rbl_now_ms());
-        if (remain <= 0) break;
-        char *rs =
-            cdp_eval_string(&w, "document.readyState", remain < 3000 ? remain : 3000);
-        bool complete = rs && strcmp(rs, "complete") == 0;
-        free(rs);
-        if (complete) break;
-        rbl_sleep_ms(150);
-    }
-    rbl_sleep_ms(settle);
-
-    char *html = cdp_eval_string(
-        &w, "document.documentElement ? document.documentElement.outerHTML : ''",
-        15000);
+    char *html = rbl_session_html(s);
     if (!html) {
-        rbl_logf("browser: outerHTML eval failed");
-        goto cleanup;
+        rbl_session_close(s);
+        return RBL_ERR_RENDER;
     }
-
-    char *final_url = cdp_eval_string(&w, "location.href", 5000);
-
     if (out_html)
         *out_html = html;
     else
         free(html);
-    if (out_final_url)
-        *out_final_url = final_url ? final_url : rbl_strdup(url);
-    else
-        free(final_url);
-
+    if (out_final_url) {
+        const char *cur = rbl_session_url(s);
+        *out_final_url = rbl_strdup(cur ? cur : url);
+    }
     if (opts->screenshot && out_png) {
         size_t pl = 0;
-        char *png = cdp_screenshot(&w, opts->full_page, 20000, &pl);
+        unsigned char *png = rbl_session_screenshot(s, opts->full_page, &pl);
         if (png) {
-            *out_png = (unsigned char *)png;
+            *out_png = png;
             if (out_png_len) *out_png_len = pl;
         }
     }
-    result = RBL_OK;
-
-cleanup:
-    if (w.fd >= 0) close(w.fd);
-    kill_browser(&bp);
-    return result;
+    rbl_session_close(s);
+    return RBL_OK;
 }

@@ -2,6 +2,7 @@
 #include "internal.h"
 #include "charset.h"
 #include "net.h"
+#include "url.h"
 #include "util.h"
 
 #include <curl/curl.h>
@@ -80,7 +81,8 @@ static bool status_transient(rbl_status s, long code) {
 }
 
 static rbl_status do_fetch(rbl_client *c, const char *url, const char *ua,
-                           const char *al, long timeout_ms, rbl_http_result *out) {
+                           const char *al, const char *proxy, long timeout_ms,
+                           rbl_http_result *out) {
     CURL *h = curl_easy_init();
     if (!h) return RBL_ERR_OOM;
 
@@ -141,6 +143,8 @@ static rbl_status do_fetch(rbl_client *c, const char *url, const char *ua,
 #endif
     /* Proxy environment (HTTPS_PROXY) is honored by libcurl automatically. */
     if (c->share) curl_easy_setopt(h, CURLOPT_SHARE, c->share);
+    /* Explicit proxy from the pool overrides any environment proxy. */
+    if (proxy && *proxy) curl_easy_setopt(h, CURLOPT_PROXY, proxy);
     /* In-memory cookie engine (or a file if configured). */
     curl_easy_setopt(h, CURLOPT_COOKIEFILE,
                      c->cfg.cookie_file ? c->cfg.cookie_file : "");
@@ -220,6 +224,10 @@ rbl_status rbl_http_get(rbl_client *c, const char *url, const char *ua, const ch
     if (!al) al = c->accept_language;
     if (timeout_ms <= 0) timeout_ms = c->cfg.default_timeout_ms;
 
+    /* Host for sticky-per-host proxy selection. */
+    rbl_url u;
+    bool have_host = rbl_url_parse(url, &u);
+
     rbl_status st = RBL_ERR_NETWORK;
     long backoff = 500;
     for (int attempt = 0; attempt <= c->cfg.max_retries; attempt++) {
@@ -228,19 +236,23 @@ rbl_status rbl_http_get(rbl_client *c, const char *url, const char *ua, const ch
             rbl_sleep_ms(backoff);
             backoff *= 2;
         }
-        st = do_fetch(c, url, ua, al, timeout_ms, out);
-        if (st == RBL_OK && !status_transient(st, out->http_code)) return RBL_OK;
+        char *proxy = rbl_client_pick_proxy(c, have_host ? u.host : NULL);
+        st = do_fetch(c, url, ua, al, proxy, timeout_ms, out);
+        free(proxy);
+        if (st == RBL_OK && !status_transient(st, out->http_code)) goto done;
         if (st == RBL_OK) {
             /* Transient HTTP status (429/5xx): keep result for the last try. */
             if (attempt < c->cfg.max_retries)
                 rbl_http_result_free(out);
             else
-                return RBL_OK;
+                goto done;
         } else {
-            if (!status_transient(st, 0) || attempt == c->cfg.max_retries) return st;
+            if (!status_transient(st, 0) || attempt == c->cfg.max_retries) goto done;
             rbl_http_result_free(out);
         }
     }
+done:
+    if (have_host) rbl_url_free(&u);
     return st;
 }
 

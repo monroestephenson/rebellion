@@ -48,6 +48,7 @@ void test_entities(void);
 void test_url(void);
 void test_robots(void);
 void test_html(void);
+void test_proxy(void);
 void test_integration(void);
 
 #endif

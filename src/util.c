@@ -309,13 +309,14 @@ unsigned char *rbl_base64_decode(const char *in, size_t in_len, size_t *out_len)
     unsigned char *out = (unsigned char *)malloc(in_len / 4 * 3 + 4);
     if (!out) return NULL;
     size_t o = 0;
-    int val = 0, bits = 0;
+    unsigned val = 0; /* unsigned: shifting accumulates bits, must not be UB */
+    int bits = 0;
     for (size_t i = 0; i < in_len; i++) {
         unsigned char c = (unsigned char)in[i];
         if (c == '=') break;
         signed char d = dec[c];
-        if (d < 0) continue; /* skip whitespace/newlines */
-        val = (val << 6) | d;
+        if (d < 0) continue;                          /* skip whitespace/newlines */
+        val = ((val << 6) | (unsigned)d) & 0xFFFFFFu; /* keep only live bits */
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
