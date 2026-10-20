@@ -32,6 +32,50 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Install + consume (pkg-config & find_package)
+        run: |
+          cmake --install build --prefix "$PWD/_prefix"
+          export PKG_CONFIG_PATH="$PWD/_prefix/lib/pkgconfig"
+          cat > /tmp/consume.c <<'EOF'
+          #include <rebellion/rebellion.h>
+          #include <stdio.h>
+          int main(void){ rbl_client *c = rbl_client_new(NULL);
+            printf("ok %s\n", RBL_VERSION_STRING); rbl_client_free(c); return 0; }
+          EOF
+          ${CC:-cc} /tmp/consume.c $(pkg-config --cflags --libs librebellion) -o /tmp/consume
+          /tmp/consume
+          cmake -S .github/consumer -B /tmp/fp -Drebellion_DIR="$PWD/_prefix/lib/cmake/rebellion"
+          cmake --build /tmp/fp
+          /tmp/fp/consumer
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format check
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang-format
+          clang-format --dry-run --Werror src/*.c src/*.h tests/*.c tests/*.h \
+            fuzz/*.c examples/*.c
+
+  fuzz-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libcurl4-openssl-dev clang
+      - name: Build + smoke-run fuzzer
+        run: |
+          cmake -S . -B build-fuzz -DREBELLION_FUZZ=ON \
+            -DREBELLION_BUILD_TESTS=OFF -DREBELLION_BUILD_CLI=OFF \
+            -DREBELLION_HARDEN=OFF -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -g -O1"
+          cmake --build build-fuzz -j
+          ./build-fuzz/fuzz/fuzz_html -max_total_time=30 -print_final_stats=1
+
   sanitizers:
     runs-on: ubuntu-latest
     steps:

@@ -8,35 +8,35 @@
 
 /* ---- growable buffer (also used as a string builder) ---------------- */
 typedef struct {
-    char  *data;
+    char *data;
     size_t len;
     size_t cap;
 } rbl_buf;
 
-void  rbl_buf_init(rbl_buf *b);
-void  rbl_buf_free(rbl_buf *b);
-void  rbl_buf_reset(rbl_buf *b);           /* len=0, keep capacity */
-bool  rbl_buf_reserve(rbl_buf *b, size_t extra);
-bool  rbl_buf_append(rbl_buf *b, const void *p, size_t n);
-bool  rbl_buf_append_str(rbl_buf *b, const char *s);
-bool  rbl_buf_append_ch(rbl_buf *b, char c);
-bool  rbl_buf_appendf(rbl_buf *b, const char *fmt, ...);
+void rbl_buf_init(rbl_buf *b);
+void rbl_buf_free(rbl_buf *b);
+void rbl_buf_reset(rbl_buf *b); /* len=0, keep capacity */
+bool rbl_buf_reserve(rbl_buf *b, size_t extra);
+bool rbl_buf_append(rbl_buf *b, const void *p, size_t n);
+bool rbl_buf_append_str(rbl_buf *b, const char *s);
+bool rbl_buf_append_ch(rbl_buf *b, char c);
+bool rbl_buf_appendf(rbl_buf *b, const char *fmt, ...);
 /* Ensure a trailing NUL without counting it in len. Returns b->data. */
 char *rbl_buf_cstr(rbl_buf *b);
 /* Detach the buffer into a heap C string (NUL-terminated); resets b. */
 char *rbl_buf_steal(rbl_buf *b);
 
 /* ---- string helpers ------------------------------------------------- */
-char  *rbl_strdup(const char *s);
-char  *rbl_strndup(const char *s, size_t n);
-bool   rbl_streq_ci(const char *a, const char *b);
-bool   rbl_strcaseprefix(const char *s, const char *prefix); /* ci prefix */
-char  *rbl_strdup_lower(const char *s);
-void   rbl_str_tolower_inplace(char *s);
+char *rbl_strdup(const char *s);
+char *rbl_strndup(const char *s, size_t n);
+bool rbl_streq_ci(const char *a, const char *b);
+bool rbl_strcaseprefix(const char *s, const char *prefix); /* ci prefix */
+char *rbl_strdup_lower(const char *s);
+void rbl_str_tolower_inplace(char *s);
 /* Trim ASCII whitespace; returns pointer into s and may write a NUL. */
-char  *rbl_trim(char *s);
+char *rbl_trim(char *s);
 /* Collapse runs of ASCII whitespace into single spaces, in place. */
-void   rbl_collapse_ws(char *s);
+void rbl_collapse_ws(char *s);
 
 /* ---- string set (hash set of owned C strings) ----------------------- */
 typedef struct rbl_strset_node {

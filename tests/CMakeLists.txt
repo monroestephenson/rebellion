@@ -6,6 +6,7 @@ add_executable(rebellion_tests
     test_url.c
     test_robots.c
     test_html.c
+    test_integration.c
 )
 target_link_libraries(rebellion_tests PRIVATE rebellion)
 target_include_directories(rebellion_tests PRIVATE

@@ -44,7 +44,10 @@ bool rbl_url_parse(const char *in, rbl_url *out) {
 
     curl_url_cleanup(h);
 
-    if (!out->host || !out->full) { rbl_url_free(out); return false; }
+    if (!out->host || !out->full) {
+        rbl_url_free(out);
+        return false;
+    }
     if (!out->path) out->path = rbl_strdup("/");
     return true;
 }
@@ -88,8 +91,12 @@ char *rbl_url_strip_fragment(const char *url) {
 
 void rbl_url_free(rbl_url *u) {
     if (!u) return;
-    free(u->full); free(u->scheme); free(u->host);
-    free(u->port); free(u->path); free(u->query);
+    free(u->full);
+    free(u->scheme);
+    free(u->host);
+    free(u->port);
+    free(u->path);
+    free(u->query);
     memset(u, 0, sizeof(*u));
 }
 

@@ -20,12 +20,16 @@ static rbl_node *find_first_tag(rbl_node *n, const char *tag) {
 /* Concatenate descendant text into buf. */
 static void gather_text(rbl_node *n, rbl_buf *b) {
     if (!n) return;
-    if (n->type == RBL_NODE_TEXT) { rbl_buf_append_str(b, n->text); return; }
+    if (n->type == RBL_NODE_TEXT) {
+        rbl_buf_append_str(b, n->text);
+        return;
+    }
     for (rbl_node *c = n->first_child; c; c = c->next) gather_text(c, b);
 }
 
 static char *node_text_trimmed(rbl_node *n) {
-    rbl_buf b; rbl_buf_init(&b);
+    rbl_buf b;
+    rbl_buf_init(&b);
     gather_text(n, &b);
     char *s = rbl_buf_steal(&b);
     if (!s) return NULL;
@@ -67,7 +71,10 @@ void rbl_extract_meta(rbl_node *root, rbl_meta *out) {
     }
     if ((!out->title || !*out->title)) {
         rbl_node *h1 = find_first_tag(root, "h1");
-        if (h1) { free(out->title); out->title = node_text_trimmed(h1); }
+        if (h1) {
+            free(out->title);
+            out->title = node_text_trimmed(h1);
+        }
     }
 
     const char *desc = meta_content(root, "name", "description");
@@ -81,13 +88,19 @@ void rbl_extract_meta(rbl_node *root, rbl_meta *out) {
 
 void rbl_meta_free(rbl_meta *m) {
     if (!m) return;
-    free(m->title); free(m->description); free(m->language);
+    free(m->title);
+    free(m->description);
+    free(m->language);
     memset(m, 0, sizeof(*m));
 }
 
 /* ---- links ---------------------------------------------------------- */
 
-typedef struct { rbl_strlist *list; rbl_strset seen; const char *base; } link_ctx;
+typedef struct {
+    rbl_strlist *list;
+    rbl_strset seen;
+    const char *base;
+} link_ctx;
 
 static void collect_links_rec(rbl_node *n, link_ctx *lc) {
     if (!n) return;
@@ -95,8 +108,7 @@ static void collect_links_rec(rbl_node *n, link_ctx *lc) {
         const char *href = rbl_node_attr(n, "href");
         if (href && *href && href[0] != '#' &&
             !rbl_strcaseprefix(href, "javascript:") &&
-            !rbl_strcaseprefix(href, "mailto:") &&
-            !rbl_strcaseprefix(href, "tel:") &&
+            !rbl_strcaseprefix(href, "mailto:") && !rbl_strcaseprefix(href, "tel:") &&
             !rbl_strcaseprefix(href, "data:")) {
             char *abs = rbl_url_resolve(lc->base, href);
             if (abs) {
@@ -104,7 +116,7 @@ static void collect_links_rec(rbl_node *n, link_ctx *lc) {
                 free(abs);
                 if (clean && rbl_strset_add(&lc->seen, clean)) {
                     char **items = realloc(lc->list->items,
-                        (lc->list->count + 1) * sizeof(char *));
+                                           (lc->list->count + 1) * sizeof(char *));
                     if (items) {
                         lc->list->items = items;
                         lc->list->items[lc->list->count++] = clean;
@@ -146,10 +158,11 @@ static void density(rbl_node *n, size_t *text, size_t *linktext, int in_link) {
 }
 
 static bool is_boilerplate_tag(const char *t) {
-    static const char *const v[] = {
-        "nav","header","footer","aside","script","style","noscript",
-        "form","svg","button","iframe", NULL };
-    for (int i = 0; v[i]; i++) if (strcmp(t, v[i]) == 0) return true;
+    static const char *const v[] = {"nav",    "header", "footer",   "aside",
+                                    "script", "style",  "noscript", "form",
+                                    "svg",    "button", "iframe",   NULL};
+    for (int i = 0; v[i]; i++)
+        if (strcmp(t, v[i]) == 0) return true;
     return false;
 }
 
@@ -168,19 +181,27 @@ static rbl_node *best_block(rbl_node *n, long *best_score, rbl_node *best) {
     if (!n) return best;
     if (n->type == RBL_NODE_ELEMENT && n->tag) {
         if (is_boilerplate_tag(n->tag)) return best; /* don't descend */
-        static const char *const containers[] = {
-            "article","main","section","div","td", NULL };
+        static const char *const containers[] = {"article", "main", "section",
+                                                 "div",     "td",   NULL};
         bool is_container = false;
         for (int i = 0; containers[i]; i++)
-            if (strcmp(n->tag, containers[i]) == 0) { is_container = true; break; }
+            if (strcmp(n->tag, containers[i]) == 0) {
+                is_container = true;
+                break;
+            }
         const char *role = rbl_node_attr(n, "role");
         if (role && rbl_streq_ci(role, "main")) is_container = true;
         if (is_container) {
             long s = score_node(n);
             /* Prefer semantic tags with a bonus. */
-            if (rbl_node_is(n, "article")) s += 300;
-            else if (rbl_node_is(n, "main")) s += 250;
-            if (s > *best_score) { *best_score = s; best = n; }
+            if (rbl_node_is(n, "article"))
+                s += 300;
+            else if (rbl_node_is(n, "main"))
+                s += 250;
+            if (s > *best_score) {
+                *best_score = s;
+                best = n;
+            }
         }
     }
     for (rbl_node *c = n->first_child; c; c = c->next)

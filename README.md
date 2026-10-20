@@ -60,6 +60,31 @@ ctest --test-dir build        # run the unit tests
 
 The binary is `build/rebellion`; the static library is `build/librebellion.a`.
 
+Build options: `-DBUILD_SHARED_LIBS=ON` (shared library with SONAME),
+`-DREBELLION_BUILD_TESTS=OFF`, `-DREBELLION_BUILD_CLI=OFF`,
+`-DREBELLION_WERROR=ON`, `-DREBELLION_HARDEN=ON` (default: stack protector,
+`_FORTIFY_SOURCE`, RELRO/BIND_NOW), `-DREBELLION_FUZZ=ON` (see `fuzz/`).
+
+### Installing & linking
+
+```sh
+cmake --install build --prefix /usr/local
+```
+
+This installs the headers, the library, a man page, a **pkg-config** file and
+a **CMake package config**. Consume it either way:
+
+```sh
+# pkg-config
+cc my.c $(pkg-config --cflags --libs librebellion) -o my
+```
+
+```cmake
+# CMake
+find_package(rebellion REQUIRED)
+target_link_libraries(myapp PRIVATE rebellion::rebellion)
+```
+
 For the **browser engine** you also need a Chromium or Chrome binary.
 rebellion looks for it automatically (including the Playwright layout at
 `/opt/pw-browsers/chromium`); override with `$REBELLION_CHROMIUM` or
@@ -164,6 +189,29 @@ void elements, comments and entities) rather than a full HTML5 state machine,
 which keeps it small while handling real-world markup. The DevTools client
 speaks WebSocket over a raw localhost socket, so there is no dependency on a
 WebSocket-enabled libcurl build.
+
+## Production notes
+
+**Thread safety.** A `rbl_client` is safe to share across threads: libcurl's
+shared cookie/DNS/TLS state is protected by per-class mutexes, global init
+runs once under `pthread_once`, and per-host rate-limiting is locked. Create
+one client and reuse it; each `rbl_scrape`/`rbl_crawl` call uses its own curl
+easy handle. (A single `rbl_doc` is not meant to be mutated from two threads
+at once, but distinct calls returning distinct docs are fine.)
+
+**Security / SSRF.** By default rebellion refuses to fetch loopback, private
+(RFC1918 / ULA), link-local (including the `169.254.169.254` cloud-metadata
+address), CGNAT and unspecified/multicast targets — covering both literal
+hosts and DNS names that resolve into those ranges (`RBL_ERR_BLOCKED`).
+Transfers are restricted to `http`/`https` so a redirect cannot pivot to
+`file://`. TLS verification is always on. Set `allow_private_networks`
+(`--allow-private`) to scrape internal hosts you control. See
+[SECURITY.md](SECURITY.md).
+
+**Resource bounds.** Response bodies and WebSocket frames are capped at
+256 MiB and parser nesting is bounded, so hostile input can't exhaust memory
+or blow the stack. Per-request and connect timeouts, redirect caps and
+transient-failure retries with backoff are all configurable.
 
 ## Responsible use
 

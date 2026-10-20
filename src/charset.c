@@ -16,17 +16,24 @@ static char *extract_charset(const char *s) {
     while ((p = strcasestr(p, "charset")) != NULL) {
         const char *q = p + 7;
         while (*q == ' ' || *q == '\t') q++;
-        if (*q != '=') { p += 7; continue; }
+        if (*q != '=') {
+            p += 7;
+            continue;
+        }
         q++;
         while (*q == ' ' || *q == '\t') q++;
         char quote = 0;
-        if (*q == '"' || *q == '\'') { quote = *q; q++; }
+        if (*q == '"' || *q == '\'') {
+            quote = *q;
+            q++;
+        }
         const char *start = q;
         while (*q) {
-            if (quote) { if (*q == quote) break; }
-            else if (*q == ';' || *q == ' ' || *q == '\t' ||
-                     *q == '\r' || *q == '\n' || *q == '/' ||
-                     *q == '>' || *q == '"' || *q == '\'') break;
+            if (quote) {
+                if (*q == quote) break;
+            } else if (*q == ';' || *q == ' ' || *q == '\t' || *q == '\r' ||
+                       *q == '\n' || *q == '/' || *q == '>' || *q == '"' || *q == '\'')
+                break;
             q++;
         }
         if (q > start) {
@@ -47,8 +54,8 @@ char *rbl_charset_from_html(const char *data, size_t len) {
     if (!data || len == 0) return NULL;
 
     /* BOMs. */
-    if (len >= 3 && (unsigned char)data[0] == 0xEF &&
-        (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF)
+    if (len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB &&
+        (unsigned char)data[2] == 0xBF)
         return rbl_strdup("utf-8");
     if (len >= 2 && (unsigned char)data[0] == 0xFF && (unsigned char)data[1] == 0xFE)
         return rbl_strdup("utf-16le");
@@ -70,7 +77,11 @@ char *rbl_charset_from_html(const char *data, size_t len) {
             char *tag = rbl_strndup(p, tlen);
             char *cs = extract_charset(tag);
             free(tag);
-            if (cs) { result = cs; free(head); return result; }
+            if (cs) {
+                result = cs;
+                free(head);
+                return result;
+            }
         }
         p++;
     }
@@ -83,11 +94,13 @@ static const char *canon_charset(const char *cs) {
     if (!cs) return NULL;
     if (!strcmp(cs, "utf8") || !strcmp(cs, "utf-8")) return "UTF-8";
     if (!strcmp(cs, "latin1") || !strcmp(cs, "iso-8859-1") ||
-        !strcmp(cs, "iso8859-1") || !strcmp(cs, "l1")) return "ISO-8859-1";
+        !strcmp(cs, "iso8859-1") || !strcmp(cs, "l1"))
+        return "ISO-8859-1";
     if (!strcmp(cs, "iso-8859-15") || !strcmp(cs, "iso8859-15") ||
-        !strcmp(cs, "latin9")) return "ISO-8859-15";
-    if (!strcmp(cs, "windows-1252") || !strcmp(cs, "cp1252") ||
-        !strcmp(cs, "win-1252")) return "WINDOWS-1252";
+        !strcmp(cs, "latin9"))
+        return "ISO-8859-15";
+    if (!strcmp(cs, "windows-1252") || !strcmp(cs, "cp1252") || !strcmp(cs, "win-1252"))
+        return "WINDOWS-1252";
     if (!strcmp(cs, "us-ascii") || !strcmp(cs, "ascii")) return "ISO-8859-1";
     if (!strcmp(cs, "utf-16")) return "UTF-16";
     if (!strcmp(cs, "utf-16le")) return "UTF-16LE";
@@ -101,11 +114,16 @@ static bool is_valid_utf8(const char *s, size_t n) {
     size_t i = 0;
     while (i < n) {
         unsigned char c = p[i];
-        if (c < 0x80) { i++; continue; }
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
         int extra;
         unsigned char lo = 0x80, hi = 0xBF;
-        if ((c & 0xE0) == 0xC0) { extra = 1; if (c < 0xC2) return false; }
-        else if ((c & 0xF0) == 0xE0) {
+        if ((c & 0xE0) == 0xC0) {
+            extra = 1;
+            if (c < 0xC2) return false;
+        } else if ((c & 0xF0) == 0xE0) {
             extra = 2;
             if (c == 0xE0) lo = 0xA0;
             if (c == 0xED) hi = 0x9F;
@@ -113,7 +131,8 @@ static bool is_valid_utf8(const char *s, size_t n) {
             extra = 3;
             if (c == 0xF0) lo = 0x90;
             if (c == 0xF4) hi = 0x8F;
-        } else return false;
+        } else
+            return false;
         if (i + (size_t)extra >= n) return false;
         for (int k = 1; k <= extra; k++) {
             unsigned char cc = p[i + k];
@@ -129,10 +148,12 @@ static bool is_valid_utf8(const char *s, size_t n) {
 /* Map a single ISO-8859-1 byte to UTF-8 (1 or 2 bytes). Used as a last
  * resort so we never produce garbage for unknown encodings. */
 static char *latin1_to_utf8(const char *in, size_t n, size_t *out_len) {
-    rbl_buf b; rbl_buf_init(&b);
+    rbl_buf b;
+    rbl_buf_init(&b);
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)in[i];
-        if (c < 0x80) rbl_buf_append_ch(&b, (char)c);
+        if (c < 0x80)
+            rbl_buf_append_ch(&b, (char)c);
         else {
             rbl_buf_append_ch(&b, (char)(0xC0 | (c >> 6)));
             rbl_buf_append_ch(&b, (char)(0x80 | (c & 0x3F)));
@@ -151,7 +172,8 @@ static char *iconv_convert(const char *from, const char *in, size_t in_len,
         if (cd == (iconv_t)-1) return NULL;
     }
 
-    rbl_buf b; rbl_buf_init(&b);
+    rbl_buf b;
+    rbl_buf_init(&b);
     char *inbuf = (char *)in;
     size_t inleft = in_len;
     char tmp[8192];
@@ -162,12 +184,13 @@ static char *iconv_convert(const char *from, const char *in, size_t in_len,
         size_t r = iconv(cd, &inbuf, &inleft, &outbuf, &outleft);
         rbl_buf_append(&b, tmp, sizeof(tmp) - outleft);
         if (r == (size_t)-1) {
-            if (errno == E2BIG) continue;        /* flush and keep going */
+            if (errno == E2BIG) continue; /* flush and keep going */
             if (errno == EILSEQ || errno == EINVAL) {
                 /* Skip the offending byte and continue, so one bad byte does
                  * not nuke the whole document. */
                 if (inleft == 0) break;
-                inbuf++; inleft--;
+                inbuf++;
+                inleft--;
                 continue;
             }
             break;
@@ -182,7 +205,10 @@ static char *iconv_convert(const char *from, const char *in, size_t in_len,
 
 char *rbl_to_utf8(const char *in, size_t in_len, const char *from_charset,
                   size_t *out_len) {
-    if (!in) { if (out_len) *out_len = 0; return rbl_strdup(""); }
+    if (!in) {
+        if (out_len) *out_len = 0;
+        return rbl_strdup("");
+    }
 
     const char *canon = canon_charset(from_charset);
 
@@ -208,7 +234,10 @@ char *rbl_to_utf8(const char *in, size_t in_len, const char *from_charset,
     for (int i = 0; i < n; i++) {
         size_t ol = 0;
         char *s = iconv_convert(names[i], in, in_len, &ol);
-        if (s && ol > 0) { if (out_len) *out_len = ol; return s; }
+        if (s && ol > 0) {
+            if (out_len) *out_len = ol;
+            return s;
+        }
         free(s);
     }
 

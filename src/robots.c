@@ -21,11 +21,13 @@ static const char *get_robots(rbl_client *c, const rbl_url *u) {
     if (done) return cached;
 
     /* Build robots URL: scheme://host[:port]/robots.txt */
-    rbl_buf url; rbl_buf_init(&url);
+    rbl_buf url;
+    rbl_buf_init(&url);
     rbl_buf_appendf(&url, "%s://%s", u->scheme, u->host);
     if (u->port && *u->port) {
-        bool is_default = (rbl_streq_ci(u->scheme, "http") && strcmp(u->port, "80") == 0) ||
-                          (rbl_streq_ci(u->scheme, "https") && strcmp(u->port, "443") == 0);
+        bool is_default =
+            (rbl_streq_ci(u->scheme, "http") && strcmp(u->port, "80") == 0) ||
+            (rbl_streq_ci(u->scheme, "https") && strcmp(u->port, "443") == 0);
         if (!is_default) rbl_buf_appendf(&url, ":%s", u->port);
     }
     rbl_buf_append_str(&url, "/robots.txt");
@@ -40,7 +42,7 @@ static const char *get_robots(rbl_client *c, const rbl_url *u) {
 
     pthread_mutex_lock(&c->host_lock);
     if (!h->robots_fetched) {
-        h->robots_body = body;      /* may be NULL => allow all */
+        h->robots_body = body; /* may be NULL => allow all */
         h->robots_fetched = true;
         cached = h->robots_body;
     } else {
@@ -52,10 +54,12 @@ static const char *get_robots(rbl_client *c, const rbl_url *u) {
 }
 
 /* A line iterator over robots.txt content. */
-typedef struct { const char *p; } liter;
+typedef struct {
+    const char *p;
+} liter;
 
-static bool next_line(liter *it, const char **key, size_t *klen,
-                      const char **val, size_t *vlen) {
+static bool next_line(liter *it, const char **key, size_t *klen, const char **val,
+                      size_t *vlen) {
     while (*it->p) {
         const char *line = it->p;
         const char *eol = strpbrk(line, "\r\n");
@@ -67,14 +71,25 @@ static bool next_line(liter *it, const char **key, size_t *klen,
         /* split key:value */
         const char *colon = memchr(line, ':', len);
         if (!colon) continue;
-        const char *k = line; size_t kl = (size_t)(colon - line);
-        const char *v = colon + 1; size_t vl = len - kl - 1;
-        while (kl && isspace((unsigned char)k[0])) { k++; kl--; }
-        while (kl && isspace((unsigned char)k[kl-1])) kl--;
-        while (vl && isspace((unsigned char)v[0])) { v++; vl--; }
-        while (vl && isspace((unsigned char)v[vl-1])) vl--;
+        const char *k = line;
+        size_t kl = (size_t)(colon - line);
+        const char *v = colon + 1;
+        size_t vl = len - kl - 1;
+        while (kl && isspace((unsigned char)k[0])) {
+            k++;
+            kl--;
+        }
+        while (kl && isspace((unsigned char)k[kl - 1])) kl--;
+        while (vl && isspace((unsigned char)v[0])) {
+            v++;
+            vl--;
+        }
+        while (vl && isspace((unsigned char)v[vl - 1])) vl--;
         if (kl == 0) continue;
-        *key = k; *klen = kl; *val = v; *vlen = vl;
+        *key = k;
+        *klen = kl;
+        *val = v;
+        *vlen = vl;
         return true;
     }
     return false;
@@ -98,11 +113,14 @@ static bool robots_match(const char *pat, size_t patlen, const char *path) {
             return si == slen; /* false here, since si < slen */
         }
         if (pi < patlen && pat[pi] == '*') {
-            star = pi++; smark = si;
+            star = pi++;
+            smark = si;
         } else if (pi < patlen && pat[pi] == path[si]) {
-            pi++; si++;
+            pi++;
+            si++;
         } else if (star != (size_t)-1) {
-            pi = star + 1; si = ++smark;
+            pi = star + 1;
+            si = ++smark;
         } else {
             return false;
         }
@@ -115,38 +133,42 @@ static bool robots_match(const char *pat, size_t patlen, const char *path) {
 }
 
 typedef struct {
-    bool have_match;       /* did any group's UA token match us? */
+    bool have_match; /* did any group's UA token match us? */
     /* best rule found */
     size_t best_len;
-    bool   best_allow;
-    long   crawl_delay;
+    bool best_allow;
+    long crawl_delay;
 } robots_eval;
 
 /* Evaluate robots content against path for ua_token (and "*"). */
-static void eval_robots(const char *content, const char *path,
-                        const char *ua_token, robots_eval *out) {
+static void eval_robots(const char *content, const char *path, const char *ua_token,
+                        robots_eval *out) {
     memset(out, 0, sizeof(*out));
     out->best_allow = true;
     out->best_len = 0;
     out->crawl_delay = -1;
     if (!content) return;
 
-    liter it; it.p = content;
-    const char *k, *v; size_t kl, vl;
+    liter it;
+    it.p = content;
+    const char *k, *v;
+    size_t kl, vl;
 
     /* Two passes conceptually: collect rules for groups that apply to us.
      * A group applies if any of its User-agent lines is "*" or matches our
      * token (case-insensitive substring). Specific-token groups override the
      * "*" group per spec; we approximate by preferring specific matches. */
-    bool in_group = false;        /* currently inside an applicable group */
-    bool group_specific = false;  /* applicable via our token, not "*"    */
-    bool specific_seen = false;   /* any specific group matched at all     */
-    bool reading_agents = false;  /* consecutive UA lines form one group   */
+    bool in_group = false;       /* currently inside an applicable group */
+    bool group_specific = false; /* applicable via our token, not "*"    */
+    bool specific_seen = false;  /* any specific group matched at all     */
+    bool reading_agents = false; /* consecutive UA lines form one group   */
 
     /* First scan: determine if a token-specific group exists. */
     {
-        liter it2; it2.p = content;
-        const char *kk, *vv; size_t kkl, vvl;
+        liter it2;
+        it2.p = content;
+        const char *kk, *vv;
+        size_t kkl, vvl;
         bool agents = false;
         while (next_line(&it2, &kk, &kkl, &vv, &vvl)) {
             if (key_is(kk, kkl, "user-agent")) {
@@ -173,10 +195,11 @@ static void eval_robots(const char *content, const char *path,
             char *ua = rbl_strndup(v, vl);
             rbl_str_tolower_inplace(ua);
             if (strcmp(ua, "*") == 0) {
-                if (!specific_seen) in_group = true;  /* use * only if no specific */
+                if (!specific_seen) in_group = true; /* use * only if no specific */
             }
             if (ua_token && *ua_token && strstr(ua, ua_token)) {
-                in_group = true; group_specific = true;
+                in_group = true;
+                group_specific = true;
             }
             free(ua);
             continue;

@@ -71,7 +71,8 @@ void test_markdown(void) {
 
     /* table */
     md = md_of("<table><tr><th>Name</th><th>Wert</th></tr>"
-               "<tr><td>a</td><td>1</td></tr></table>", false);
+               "<tr><td>a</td><td>1</td></tr></table>",
+               false);
     CHECK_CONTAINS(md, "| Name | Wert |");
     CHECK_CONTAINS(md, "| --- |");
     CHECK_CONTAINS(md, "| a | 1 |");
@@ -82,7 +83,8 @@ void test_markdown(void) {
                "<article><h1>Inhalt</h1><p>Das ist der Haupttext mit genug "
                "Woertern, damit die Heuristik den Artikel als Hauptinhalt "
                "auswaehlt und die Navigation verwirft.</p></article>"
-               "<footer>Impressum Footerzeug</footer></body>", true);
+               "<footer>Impressum Footerzeug</footer></body>",
+               true);
     CHECK_CONTAINS(md, "# Inhalt");
     CHECK_CONTAINS(md, "Haupttext");
     CHECK(strstr(md, "Impressum") == NULL);

@@ -1,0 +1,101 @@
+.TH REBELLION 1 "2026" "rebellion 0.1.0" "User Commands"
+.SH NAME
+rebellion \- a Firecrawl-style web scraper that outputs clean Markdown
+.SH SYNOPSIS
+.B rebellion
+.I command
+.I url
+.RI [ options ]
+.SH DESCRIPTION
+.B rebellion
+fetches web pages and converts them to clean Markdown plus structured
+metadata and links. It has an HTTP engine (libcurl) and a headless Chromium
+engine driven over the DevTools Protocol; an
+.B auto
+mode uses HTTP first and escalates to the browser when a page looks
+JavaScript-gated. Legacy encodings (ISO-8859-1/15, Windows-1252) are detected
+and converted to UTF-8.
+.SH COMMANDS
+.TP
+.B scrape \fIurl\fR
+Fetch a single URL and emit Markdown (or JSON).
+.TP
+.B crawl \fIurl\fR
+Crawl within a site (breadth-first) following links.
+.TP
+.B map \fIurl\fR
+Quickly discover URLs from the site's sitemap(s) and homepage links.
+.SH OPTIONS
+.TP
+.B \-\-json
+Emit JSON instead of Markdown.
+.TP
+.BR \-\-output ", " \-o " " \fIfile\fR
+Write output to a file.
+.TP
+.B \-\-engine \fImode\fR
+Rendering engine: \fBhttp\fR, \fBbrowser\fR, or \fBauto\fR (default).
+.TP
+.BR \-\-http ", " \-\-browser
+Shorthands for \-\-engine.
+.TP
+.B \-\-no\-robots
+Do not consult robots.txt. Use only where you have permission.
+.TP
+.B \-\-allow\-private
+Allow scraping loopback/private/internal hosts (the SSRF guard blocks them by
+default).
+.TP
+.B \-\-full\-page\-content
+Keep the whole page instead of just the main content.
+.TP
+.B \-\-timeout \fIms\fR
+Per-request timeout (default 30000).
+.TP
+.B \-\-delay \fIms\fR
+Minimum delay between hits to one host.
+.TP
+.B \-\-screenshot \fIfile\fR
+Save a PNG screenshot (implies the browser engine).
+.TP
+.BR \-\-verbose ", " \-v
+Log progress to stderr.
+.SH "CRAWL OPTIONS"
+.TP
+.B \-\-limit \fIn\fR
+Maximum pages to fetch (default 50).
+.TP
+.B \-\-depth \fIn\fR
+Maximum link depth from the seed (default 2).
+.TP
+.B \-\-any\-host
+Follow links off the seed's site.
+.TP
+.BR \-\-include ", " \-\-exclude " " \fIregex\fR
+Only follow / skip URLs matching a POSIX extended regular expression.
+.TP
+.B \-\-out\-dir \fIdir\fR
+Write one file per crawled page.
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success.
+.TP
+.B 1
+A scrape, crawl, or map failed.
+.TP
+.B 2
+Invalid command-line usage.
+.SH EXAMPLES
+.nf
+rebellion scrape https://www.vr.de
+rebellion scrape https://www.mediamarkt.de --browser
+rebellion crawl https://example.de --limit 25 --out-dir ./out
+rebellion map https://example.de
+.fi
+.SH "RESPONSIBLE USE"
+rebellion respects robots.txt by default, honors Crawl-delay, and rate-limits
+per host. Respect each site's terms of service, copyright, and applicable law
+(including the GDPR for personal data). You are responsible for how you use it.
+.SH "SEE ALSO"
+Project documentation and source: see the bundled README and docs/ARCHITECTURE.md.

@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/@REBELLION_PC_REL@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: librebellion
+Description: A Firecrawl-style web scraper library in C
+Version: @PROJECT_VERSION@
+Requires: libcurl
+Libs: -L${libdir} -lrebellion -lpthread
+Cflags: -I${includedir}

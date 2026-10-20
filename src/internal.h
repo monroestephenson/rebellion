@@ -8,23 +8,25 @@
 
 /* Per-host bookkeeping for polite rate limiting and robots caching. */
 typedef struct rbl_host_state {
-    char      *host;
-    long long  last_hit_ms;   /* when we last fetched from this host */
-    char      *robots_body;   /* cached robots.txt (UTF-8) or NULL   */
-    bool       robots_fetched;
+    char *host;
+    long long last_hit_ms; /* when we last fetched from this host */
+    char *robots_body;     /* cached robots.txt (UTF-8) or NULL   */
+    bool robots_fetched;
     struct rbl_host_state *next;
 } rbl_host_state;
 
 struct rbl_client {
-    rbl_client_config cfg;    /* owns its string fields */
-    char *ua;                 /* resolved default user agent  */
-    char *accept_language;    /* resolved default            */
-    char *chromium_path;      /* resolved, or NULL           */
+    rbl_client_config cfg; /* owns its string fields */
+    char *ua;              /* resolved default user agent  */
+    char *accept_language; /* resolved default            */
+    char *chromium_path;   /* resolved, or NULL           */
+    bool proxied;          /* an HTTPS/ALL proxy is configured in env */
 
-    CURLSH *share;            /* shares cookies + DNS across easy handles */
-    pthread_mutex_t share_lock;
+    CURLSH *share; /* shares cookies + DNS across easy handles */
+    /* One mutex per curl_lock_data class, indexed by the enum value. */
+    pthread_mutex_t share_mtx[CURL_LOCK_DATA_LAST];
 
-    rbl_host_state *hosts;    /* linked list, guarded by host_lock */
+    rbl_host_state *hosts; /* linked list, guarded by host_lock */
     pthread_mutex_t host_lock;
 };
 

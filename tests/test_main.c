@@ -10,6 +10,7 @@ int main(void) {
     test_html();
     test_markdown();
     test_robots();
+    test_integration();
 
     printf("\n%d checks, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;

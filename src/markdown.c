@@ -11,23 +11,28 @@
 
 typedef struct {
     rbl_buf out;
-    rbl_buf prefix;      /* continuation prefix for new lines */
-    char   *oneshot;     /* used once instead of prefix at next line start */
-    bool    at_bol;      /* at beginning of a line */
-    bool    want_gap;    /* blank line requested before next content */
-    bool    pending_space;
-    bool    in_pre;
+    rbl_buf prefix; /* continuation prefix for new lines */
+    char *oneshot;  /* used once instead of prefix at next line start */
+    bool at_bol;    /* at beginning of a line */
+    bool want_gap;  /* blank line requested before next content */
+    bool pending_space;
+    bool in_pre;
     const char *base;
-    bool    drop_boiler;
-    int     list_depth;
-    struct { bool ordered; int counter; } lists[MAX_LIST];
+    bool drop_boiler;
+    int list_depth;
+    struct {
+        bool ordered;
+        int counter;
+    } lists[MAX_LIST];
 } md_ctx;
 
 static void md_raw(md_ctx *m, const char *s, size_t n) {
     rbl_buf_append(&m->out, s, n);
     if (n) m->at_bol = (s[n - 1] == '\n');
 }
-static void md_raws(md_ctx *m, const char *s) { md_raw(m, s, strlen(s)); }
+static void md_raws(md_ctx *m, const char *s) {
+    md_raw(m, s, strlen(s));
+}
 
 /* Right-trimmed copy length of the prefix (for blank lines). */
 static void emit_prefix_rtrim(md_ctx *m) {
@@ -43,9 +48,9 @@ static void emit_prefix_rtrim(md_ctx *m) {
 static void flush_gap(md_ctx *m) {
     if (!m->want_gap) return;
     m->want_gap = false;
-    if (m->out.len == 0) return;         /* nothing before us */
-    if (!m->at_bol) md_raws(m, "\n");    /* end current line */
-    emit_prefix_rtrim(m);                /* blank separator line */
+    if (m->out.len == 0) return;      /* nothing before us */
+    if (!m->at_bol) md_raws(m, "\n"); /* end current line */
+    emit_prefix_rtrim(m);             /* blank separator line */
     md_raws(m, "\n");
 }
 
@@ -67,12 +72,15 @@ static void md_newline(md_ctx *m) {
     if (!m->at_bol) md_raws(m, "\n");
 }
 
-static void request_gap(md_ctx *m) { m->pending_space = false; m->want_gap = true; }
+static void request_gap(md_ctx *m) {
+    m->pending_space = false;
+    m->want_gap = true;
+}
 
 /* Append one inline text char, escaping markdown-significant characters. */
 static void put_text_char(md_ctx *m, char c) {
     if (c == '\\' || c == '`' || c == '*' || c == '[' || c == ']') {
-        char esc[2] = { '\\', c };
+        char esc[2] = {'\\', c};
         md_raw(m, esc, 2);
     } else {
         md_raw(m, &c, 1);
@@ -84,7 +92,10 @@ static void md_text(md_ctx *m, const char *s) {
     if (!s) return;
     for (const char *p = s; *p; p++) {
         unsigned char c = (unsigned char)*p;
-        if (isspace(c)) { m->pending_space = true; continue; }
+        if (isspace(c)) {
+            m->pending_space = true;
+            continue;
+        }
         if (m->pending_space) {
             m->pending_space = false;
             if (!m->at_bol) md_raws(m, " ");
@@ -113,16 +124,17 @@ static char *resolve(md_ctx *m, const char *ref) {
 
 static bool skip_always(const char *t) {
     static const char *const v[] = {
-        "head","title","meta","link","script","style","noscript","svg",
-        "template","base","map","object","param","source","track", NULL };
-    for (int i = 0; v[i]; i++) if (strcmp(t, v[i]) == 0) return true;
+        "head",     "title", "meta", "link",   "script", "style",  "noscript", "svg",
+        "template", "base",  "map",  "object", "param",  "source", "track",    NULL};
+    for (int i = 0; v[i]; i++)
+        if (strcmp(t, v[i]) == 0) return true;
     return false;
 }
 static bool skip_boiler(const char *t) {
-    static const char *const v[] = {
-        "nav","header","footer","aside","form","button","iframe","dialog",
-        "menu", NULL };
-    for (int i = 0; v[i]; i++) if (strcmp(t, v[i]) == 0) return true;
+    static const char *const v[] = {"nav",    "header", "footer", "aside", "form",
+                                    "button", "iframe", "dialog", "menu",  NULL};
+    for (int i = 0; v[i]; i++)
+        if (strcmp(t, v[i]) == 0) return true;
     return false;
 }
 
@@ -154,11 +166,15 @@ static char *render_inline_string(rbl_node *n, const char *base) {
     rbl_buf_free(&t.prefix);
     if (!s) return rbl_strdup("");
     /* Collapse any newlines to spaces and escape pipes for table cells. */
-    rbl_buf b; rbl_buf_init(&b);
+    rbl_buf b;
+    rbl_buf_init(&b);
     for (char *p = s; *p; p++) {
-        if (*p == '\n' || *p == '\r') { rbl_buf_append_ch(&b, ' '); }
-        else if (*p == '|') { rbl_buf_append_str(&b, "\\|"); }
-        else rbl_buf_append_ch(&b, *p);
+        if (*p == '\n' || *p == '\r') {
+            rbl_buf_append_ch(&b, ' ');
+        } else if (*p == '|') {
+            rbl_buf_append_str(&b, "\\|");
+        } else
+            rbl_buf_append_ch(&b, *p);
     }
     free(s);
     char *r = rbl_buf_steal(&b);
@@ -185,13 +201,19 @@ static void render_heading(md_ctx *m, rbl_node *n, int level) {
 }
 
 static void render_list(md_ctx *m, rbl_node *n, bool ordered) {
-    if (m->list_depth >= MAX_LIST) { render_children(m, n); return; }
+    if (m->list_depth >= MAX_LIST) {
+        render_children(m, n);
+        return;
+    }
     request_gap(m);
     int idx = m->list_depth++;
     m->lists[idx].ordered = ordered;
     int start = 1;
     const char *sa = rbl_node_attr(n, "start");
-    if (ordered && sa) { int v = atoi(sa); if (v > 0) start = v; }
+    if (ordered && sa) {
+        int v = atoi(sa);
+        if (v > 0) start = v;
+    }
     m->lists[idx].counter = start;
 
     size_t saved_prefix_len = m->prefix.len;
@@ -201,15 +223,18 @@ static void render_list(md_ctx *m, rbl_node *n, bool ordered) {
 
         /* Build marker. */
         char marker[24];
-        if (ordered) snprintf(marker, sizeof(marker), "%d. ", m->lists[idx].counter++);
-        else snprintf(marker, sizeof(marker), "- ");
+        if (ordered)
+            snprintf(marker, sizeof(marker), "%d. ", m->lists[idx].counter++);
+        else
+            snprintf(marker, sizeof(marker), "- ");
         size_t mw = strlen(marker);
 
-        md_newline(m);           /* finish previous line */
-        m->want_gap = false;     /* tight list between items */
+        md_newline(m);       /* finish previous line */
+        m->want_gap = false; /* tight list between items */
 
         /* One-shot lead for the item's first line = prefix + marker. */
-        rbl_buf lead; rbl_buf_init(&lead);
+        rbl_buf lead;
+        rbl_buf_init(&lead);
         rbl_buf_append(&lead, m->prefix.data ? m->prefix.data : "", saved_prefix_len);
         rbl_buf_append_str(&lead, marker);
         free(m->oneshot);
@@ -224,7 +249,9 @@ static void render_list(md_ctx *m, rbl_node *n, bool ordered) {
         render_children(m, c);
 
         /* If the item produced no output, still emit the marker. */
-        if (m->oneshot) { ensure_line(m); }
+        if (m->oneshot) {
+            ensure_line(m);
+        }
 
         m->prefix.len = saved_prefix_len;
     }
@@ -242,12 +269,16 @@ static void render_table(md_ctx *m, rbl_node *n) {
     /* Gather <tr> rows, descending through thead/tbody/tfoot wrappers. */
     rbl_node *rows[1024];
     int nrows = 0;
-    rbl_node *dfs[1024]; int dfsn = 0;
+    rbl_node *dfs[1024];
+    int dfsn = 0;
     for (rbl_node *c = n->first_child; c && dfsn < 1024; c = c->next) dfs[dfsn++] = c;
     for (int i = 0; i < dfsn && nrows < 1024; i++) {
         rbl_node *x = dfs[i];
         if (x->type != RBL_NODE_ELEMENT) continue;
-        if (rbl_node_is(x, "tr")) { rows[nrows++] = x; continue; }
+        if (rbl_node_is(x, "tr")) {
+            rows[nrows++] = x;
+            continue;
+        }
         if (rbl_node_is(x, "thead") || rbl_node_is(x, "tbody") ||
             rbl_node_is(x, "tfoot")) {
             for (rbl_node *c = x->first_child; c && dfsn < 1024; c = c->next)
@@ -300,14 +331,19 @@ static void render_pre(md_ctx *m, rbl_node *n) {
     md_raws(m, "```");
     md_newline(m);
     /* Gather raw text, preserving whitespace. */
-    rbl_buf b; rbl_buf_init(&b);
+    rbl_buf b;
+    rbl_buf_init(&b);
     /* collect all descendant text */
-    rbl_node *dfs[4096]; int dn = 0;
+    rbl_node *dfs[4096];
+    int dn = 0;
     for (rbl_node *c = n->first_child; c; c = c->next) dfs[dn++] = c;
     for (int i = 0; i < dn && dn < 4096; i++) {
         rbl_node *x = dfs[i];
-        if (x->type == RBL_NODE_TEXT) rbl_buf_append_str(&b, x->text);
-        else for (rbl_node *c = x->first_child; c && dn < 4096; c = c->next) dfs[dn++] = c;
+        if (x->type == RBL_NODE_TEXT)
+            rbl_buf_append_str(&b, x->text);
+        else
+            for (rbl_node *c = x->first_child; c && dn < 4096; c = c->next)
+                dfs[dn++] = c;
     }
     char *code = rbl_buf_cstr(&b);
     /* Emit each line with the current prefix. */
@@ -336,7 +372,10 @@ static void render_node(md_ctx *m, rbl_node *n) {
         if (!m->in_pre) md_text(m, n->text);
         return;
     }
-    if (n->type == RBL_NODE_DOCUMENT) { render_children(m, n); return; }
+    if (n->type == RBL_NODE_DOCUMENT) {
+        render_children(m, n);
+        return;
+    }
     if (n->type != RBL_NODE_ELEMENT || !n->tag) return;
 
     const char *t = n->tag;
@@ -348,25 +387,65 @@ static void render_node(md_ctx *m, rbl_node *n) {
         render_heading(m, n, t[1] - '0');
         return;
     }
-    if (!strcmp(t, "p")) { request_gap(m); render_children(m, n); request_gap(m); return; }
-    if (!strcmp(t, "br")) { m->pending_space = false; md_newline(m); return; }
+    if (!strcmp(t, "p")) {
+        request_gap(m);
+        render_children(m, n);
+        request_gap(m);
+        return;
+    }
+    if (!strcmp(t, "br")) {
+        m->pending_space = false;
+        md_newline(m);
+        return;
+    }
     if (!strcmp(t, "hr")) {
-        request_gap(m); ensure_line(m); md_raws(m, "---"); request_gap(m); return;
+        request_gap(m);
+        ensure_line(m);
+        md_raws(m, "---");
+        request_gap(m);
+        return;
     }
     if (!strcmp(t, "div") || !strcmp(t, "section") || !strcmp(t, "article") ||
         !strcmp(t, "main") || !strcmp(t, "figure") || !strcmp(t, "figcaption") ||
         !strcmp(t, "details") || !strcmp(t, "summary") || !strcmp(t, "address")) {
-        request_gap(m); render_children(m, n); request_gap(m); return;
+        request_gap(m);
+        render_children(m, n);
+        request_gap(m);
+        return;
     }
-    if (!strcmp(t, "ul")) { render_list(m, n, false); return; }
-    if (!strcmp(t, "ol")) { render_list(m, n, true); return; }
-    if (!strcmp(t, "li")) { render_children(m, n); return; } /* handled by list */
-    if (!strcmp(t, "dl")) { request_gap(m); render_children(m, n); request_gap(m); return; }
+    if (!strcmp(t, "ul")) {
+        render_list(m, n, false);
+        return;
+    }
+    if (!strcmp(t, "ol")) {
+        render_list(m, n, true);
+        return;
+    }
+    if (!strcmp(t, "li")) {
+        render_children(m, n);
+        return;
+    } /* handled by list */
+    if (!strcmp(t, "dl")) {
+        request_gap(m);
+        render_children(m, n);
+        request_gap(m);
+        return;
+    }
     if (!strcmp(t, "dt")) {
-        request_gap(m); md_markup(m, "**"); m->pending_space=false;
-        render_children(m, n); md_raws(m, "**"); request_gap(m); return;
+        request_gap(m);
+        md_markup(m, "**");
+        m->pending_space = false;
+        render_children(m, n);
+        md_raws(m, "**");
+        request_gap(m);
+        return;
     }
-    if (!strcmp(t, "dd")) { request_gap(m); render_children(m, n); request_gap(m); return; }
+    if (!strcmp(t, "dd")) {
+        request_gap(m);
+        render_children(m, n);
+        request_gap(m);
+        return;
+    }
     if (!strcmp(t, "blockquote")) {
         request_gap(m);
         md_newline(m);
@@ -378,32 +457,53 @@ static void render_node(md_ctx *m, rbl_node *n) {
         request_gap(m);
         return;
     }
-    if (!strcmp(t, "pre")) { render_pre(m, n); return; }
-    if (!strcmp(t, "table")) { render_table(m, n); return; }
+    if (!strcmp(t, "pre")) {
+        render_pre(m, n);
+        return;
+    }
+    if (!strcmp(t, "table")) {
+        render_table(m, n);
+        return;
+    }
 
     if (!strcmp(t, "strong") || !strcmp(t, "b")) {
-        md_markup(m, "**"); m->pending_space=false; render_children(m, n);
-        md_raws(m, "**"); return;
+        md_markup(m, "**");
+        m->pending_space = false;
+        render_children(m, n);
+        md_raws(m, "**");
+        return;
     }
     if (!strcmp(t, "em") || !strcmp(t, "i")) {
-        md_markup(m, "*"); m->pending_space=false; render_children(m, n);
-        md_raws(m, "*"); return;
+        md_markup(m, "*");
+        m->pending_space = false;
+        render_children(m, n);
+        md_raws(m, "*");
+        return;
     }
     if (!strcmp(t, "code") || !strcmp(t, "kbd") || !strcmp(t, "samp") ||
         !strcmp(t, "tt")) {
-        md_markup(m, "`"); m->pending_space=false;
-        bool pv = m->in_pre; m->in_pre = true; /* don't escape inside code */
+        md_markup(m, "`");
+        m->pending_space = false;
+        bool pv = m->in_pre;
+        m->in_pre = true; /* don't escape inside code */
         /* gather text raw */
-        rbl_buf b; rbl_buf_init(&b);
-        rbl_node *dfs[1024]; int dn = 0;
+        rbl_buf b;
+        rbl_buf_init(&b);
+        rbl_node *dfs[1024];
+        int dn = 0;
         for (rbl_node *c = n->first_child; c; c = c->next) dfs[dn++] = c;
         for (int i = 0; i < dn && dn < 1024; i++) {
             rbl_node *x = dfs[i];
-            if (x->type == RBL_NODE_TEXT) rbl_buf_append_str(&b, x->text);
-            else for (rbl_node *c = x->first_child; c && dn < 1024; c = c->next) dfs[dn++]=c;
+            if (x->type == RBL_NODE_TEXT)
+                rbl_buf_append_str(&b, x->text);
+            else
+                for (rbl_node *c = x->first_child; c && dn < 1024; c = c->next)
+                    dfs[dn++] = c;
         }
         char *code = rbl_buf_cstr(&b);
-        for (char *p = code; p && *p; p++) { if (*p=='\n'||*p=='\r') *p=' '; }
+        for (char *p = code; p && *p; p++) {
+            if (*p == '\n' || *p == '\r') *p = ' ';
+        }
         md_raws(m, code ? code : "");
         rbl_buf_free(&b);
         m->in_pre = pv;
@@ -467,7 +567,8 @@ char *rbl_render_markdown(rbl_node *content_root, const char *base_url,
     char *raw = rbl_buf_steal(&m.out);
     if (!raw) return NULL;
 
-    rbl_buf out; rbl_buf_init(&out);
+    rbl_buf out;
+    rbl_buf_init(&out);
     int nl_run = 0;
     for (char *p = raw; *p; p++) {
         if (*p == '\n') {
@@ -484,12 +585,14 @@ char *rbl_render_markdown(rbl_node *content_root, const char *base_url,
     char *start = s;
     while (*start == '\n') start++;
     size_t len = strlen(start);
-    while (len > 0 && (start[len-1] == '\n' || start[len-1] == ' ')) len--;
+    while (len > 0 && (start[len - 1] == '\n' || start[len - 1] == ' ')) len--;
     char *final = (char *)malloc(len + 2);
-    if (!final) { return s; }
+    if (!final) {
+        return s;
+    }
     memcpy(final, start, len);
     final[len] = '\n';
-    final[len+1] = '\0';
+    final[len + 1] = '\0';
     free(s);
     return final;
 }

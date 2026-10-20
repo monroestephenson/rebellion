@@ -2,13 +2,12 @@
 #include "html.h"
 
 void test_html(void) {
-    const char *src =
-        "<!DOCTYPE html><html lang=\"de\"><head><title>Hallo</title>"
-        "<style>.x{color:red}</style></head>"
-        "<body><p>Erster <b>Absatz</b><p>Zweiter"
-        "<ul><li>eins<li>zwei</ul>"
-        "<script>var x = '<p>not a tag</p>';</script>"
-        "<a href=\"/pfad\">Link</a></body></html>";
+    const char *src = "<!DOCTYPE html><html lang=\"de\"><head><title>Hallo</title>"
+                      "<style>.x{color:red}</style></head>"
+                      "<body><p>Erster <b>Absatz</b><p>Zweiter"
+                      "<ul><li>eins<li>zwei</ul>"
+                      "<script>var x = '<p>not a tag</p>';</script>"
+                      "<a href=\"/pfad\">Link</a></body></html>";
 
     rbl_node *root = rbl_html_parse(src, strlen(src));
     CHECK(root != NULL);
@@ -24,7 +23,9 @@ void test_html(void) {
     /* <script> content must not have created a <p> element: count <p> */
     /* crude recursive count */
     int pcount = 0;
-    rbl_node *stack[256]; int sp = 0; stack[sp++] = root;
+    rbl_node *stack[256];
+    int sp = 0;
+    stack[sp++] = root;
     while (sp) {
         rbl_node *n = stack[--sp];
         if (rbl_node_is(n, "p")) pcount++;

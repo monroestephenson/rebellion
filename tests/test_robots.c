@@ -12,10 +12,9 @@ void test_robots(void) {
     CHECK(!rbl_robots_path_match("/x$", "/x/y"));
 
     /* full evaluation: generic group */
-    const char *r1 =
-        "User-agent: *\n"
-        "Disallow: /admin\n"
-        "Allow: /admin/public\n";
+    const char *r1 = "User-agent: *\n"
+                     "Disallow: /admin\n"
+                     "Allow: /admin/public\n";
     CHECK(!rbl_robots_eval_allowed(r1, "/admin/secret", "rebellion"));
     CHECK(rbl_robots_eval_allowed(r1, "/admin/public/page", "rebellion"));
     CHECK(rbl_robots_eval_allowed(r1, "/", "rebellion"));
@@ -25,12 +24,11 @@ void test_robots(void) {
     CHECK(rbl_robots_eval_allowed(r2, "/anything", "rebellion"));
 
     /* a specific group overrides the wildcard group */
-    const char *r3 =
-        "User-agent: *\n"
-        "Disallow: /\n"
-        "\n"
-        "User-agent: rebellion\n"
-        "Disallow: /nope\n";
+    const char *r3 = "User-agent: *\n"
+                     "Disallow: /\n"
+                     "\n"
+                     "User-agent: rebellion\n"
+                     "Disallow: /nope\n";
     CHECK(rbl_robots_eval_allowed(r3, "/ok", "rebellion"));
     CHECK(!rbl_robots_eval_allowed(r3, "/nope", "rebellion"));
     /* a different bot still hits the wildcard disallow-all */

@@ -38,6 +38,7 @@ typedef enum {
     RBL_ERR_RENDER,        /* headless browser render failed                */
     RBL_ERR_PARSE,
     RBL_ERR_IO,
+    RBL_ERR_BLOCKED,       /* URL blocked by the SSRF guard (private host)  */
     RBL_ERR_UNSUPPORTED
 } rbl_status;
 
@@ -96,6 +97,11 @@ typedef struct rbl_client_config {
     const char *chromium_path;    /* NULL => autodetect                     */
     const char *cookie_file;      /* NULL => in-memory cookie jar           */
     bool verbose;                 /* log to stderr                          */
+
+    /* SSRF guard. When false (default), requests to loopback, private,
+     * link-local and CGNAT addresses are refused with RBL_ERR_BLOCKED.
+     * Enable to scrape internal/localhost hosts you control. */
+    bool allow_private_networks;
 } rbl_client_config;
 
 void rbl_client_config_init(rbl_client_config *cfg);

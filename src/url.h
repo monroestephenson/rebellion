@@ -5,12 +5,12 @@
 #include <stdbool.h>
 
 typedef struct {
-    char *full;     /* normalized absolute URL                */
-    char *scheme;   /* "http" / "https"                       */
-    char *host;     /* lowercased host, no port               */
-    char *port;     /* explicit or scheme-default              */
-    char *path;     /* path (always starts with '/')          */
-    char *query;    /* without leading '?', or NULL           */
+    char *full;   /* normalized absolute URL                */
+    char *scheme; /* "http" / "https"                       */
+    char *host;   /* lowercased host, no port               */
+    char *port;   /* explicit or scheme-default              */
+    char *path;   /* path (always starts with '/')          */
+    char *query;  /* without leading '?', or NULL           */
 } rbl_url;
 
 /* Parse an absolute URL. Returns false if invalid or not http(s). */

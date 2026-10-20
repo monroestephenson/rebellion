@@ -12,15 +12,15 @@
 typedef enum { RBL_NODE_DOCUMENT, RBL_NODE_ELEMENT, RBL_NODE_TEXT } rbl_node_type;
 
 typedef struct rbl_attr {
-    char *name;   /* lowercased */
-    char *value;  /* entity-decoded UTF-8, may be NULL for valueless attrs */
+    char *name;  /* lowercased */
+    char *value; /* entity-decoded UTF-8, may be NULL for valueless attrs */
     struct rbl_attr *next;
 } rbl_attr;
 
 typedef struct rbl_node {
     rbl_node_type type;
-    char *tag;    /* lowercased tag name (elements only) */
-    char *text;   /* entity-decoded UTF-8 (text nodes only) */
+    char *tag;  /* lowercased tag name (elements only) */
+    char *text; /* entity-decoded UTF-8 (text nodes only) */
     rbl_attr *attrs;
     struct rbl_node *parent;
     struct rbl_node *first_child, *last_child;

@@ -8,15 +8,23 @@
 
 /* ---- buffer --------------------------------------------------------- */
 
-void rbl_buf_init(rbl_buf *b) { b->data = NULL; b->len = 0; b->cap = 0; }
+void rbl_buf_init(rbl_buf *b) {
+    b->data = NULL;
+    b->len = 0;
+    b->cap = 0;
+}
 
 void rbl_buf_free(rbl_buf *b) {
     if (!b) return;
     free(b->data);
-    b->data = NULL; b->len = 0; b->cap = 0;
+    b->data = NULL;
+    b->len = 0;
+    b->cap = 0;
 }
 
-void rbl_buf_reset(rbl_buf *b) { b->len = 0; }
+void rbl_buf_reset(rbl_buf *b) {
+    b->len = 0;
+}
 
 bool rbl_buf_reserve(rbl_buf *b, size_t extra) {
     /* Keep one spare byte so rbl_buf_cstr can always NUL-terminate. */
@@ -24,12 +32,16 @@ bool rbl_buf_reserve(rbl_buf *b, size_t extra) {
     if (need <= b->cap) return true;
     size_t cap = b->cap ? b->cap : 64;
     while (cap < need) {
-        if (cap > (size_t)-1 / 2) { cap = need; break; }
+        if (cap > (size_t)-1 / 2) {
+            cap = need;
+            break;
+        }
         cap *= 2;
     }
     char *p = (char *)realloc(b->data, cap);
     if (!p) return false;
-    b->data = p; b->cap = cap;
+    b->data = p;
+    b->cap = cap;
     return true;
 }
 
@@ -58,8 +70,14 @@ bool rbl_buf_appendf(rbl_buf *b, const char *fmt, ...) {
     va_copy(ap2, ap);
     int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
-    if (n < 0) { va_end(ap2); return false; }
-    if (!rbl_buf_reserve(b, (size_t)n + 1)) { va_end(ap2); return false; }
+    if (n < 0) {
+        va_end(ap2);
+        return false;
+    }
+    if (!rbl_buf_reserve(b, (size_t)n + 1)) {
+        va_end(ap2);
+        return false;
+    }
     vsnprintf(b->data + b->len, (size_t)n + 1, fmt, ap2);
     va_end(ap2);
     b->len += (size_t)n;
@@ -75,7 +93,9 @@ char *rbl_buf_cstr(rbl_buf *b) {
 char *rbl_buf_steal(rbl_buf *b) {
     if (!rbl_buf_cstr(b)) return NULL;
     char *p = b->data;
-    b->data = NULL; b->len = 0; b->cap = 0;
+    b->data = NULL;
+    b->len = 0;
+    b->cap = 0;
     return p;
 }
 
@@ -102,7 +122,8 @@ bool rbl_streq_ci(const char *a, const char *b) {
     if (!a || !b) return false;
     while (*a && *b) {
         if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
-        a++; b++;
+        a++;
+        b++;
     }
     return *a == *b;
 }
@@ -111,7 +132,8 @@ bool rbl_strcaseprefix(const char *s, const char *prefix) {
     if (!s || !prefix) return false;
     while (*prefix) {
         if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) return false;
-        s++; prefix++;
+        s++;
+        prefix++;
     }
     return true;
 }
@@ -158,7 +180,10 @@ void rbl_collapse_ws(char *s) {
 
 static unsigned long fnv1a(const char *s) {
     unsigned long h = 1469598103934665603UL;
-    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211UL; }
+    for (; *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= 1099511628211UL;
+    }
     return h;
 }
 
@@ -173,10 +198,17 @@ void rbl_strset_free(rbl_strset *s) {
     if (!s || !s->buckets) return;
     for (size_t i = 0; i < s->nbuckets; i++) {
         rbl_strset_node *n = s->buckets[i];
-        while (n) { rbl_strset_node *nx = n->next; free(n->key); free(n); n = nx; }
+        while (n) {
+            rbl_strset_node *nx = n->next;
+            free(n->key);
+            free(n);
+            n = nx;
+        }
     }
     free(s->buckets);
-    s->buckets = NULL; s->nbuckets = 0; s->count = 0;
+    s->buckets = NULL;
+    s->nbuckets = 0;
+    s->count = 0;
 }
 
 static void strset_grow(rbl_strset *s) {
@@ -188,12 +220,14 @@ static void strset_grow(rbl_strset *s) {
         while (n) {
             rbl_strset_node *nx = n->next;
             size_t b = n->hash % nb;
-            n->next = nbk[b]; nbk[b] = n;
+            n->next = nbk[b];
+            nbk[b] = n;
             n = nx;
         }
     }
     free(s->buckets);
-    s->buckets = nbk; s->nbuckets = nb;
+    s->buckets = nbk;
+    s->nbuckets = nb;
 }
 
 bool rbl_strset_contains(const rbl_strset *s, const char *key) {
@@ -206,7 +240,10 @@ bool rbl_strset_contains(const rbl_strset *s, const char *key) {
 
 bool rbl_strset_add(rbl_strset *s, const char *key) {
     if (!s || !key) return false;
-    if (!s->buckets) { rbl_strset_init(s); if (!s->buckets) return false; }
+    if (!s->buckets) {
+        rbl_strset_init(s);
+        if (!s->buckets) return false;
+    }
     unsigned long h = fnv1a(key);
     size_t b = h % s->nbuckets;
     for (rbl_strset_node *n = s->buckets[b]; n; n = n->next)
@@ -218,7 +255,10 @@ bool rbl_strset_add(rbl_strset *s, const char *key) {
     rbl_strset_node *n = (rbl_strset_node *)malloc(sizeof(*n));
     if (!n) return false;
     n->key = rbl_strdup(key);
-    if (!n->key) { free(n); return false; }
+    if (!n->key) {
+        free(n);
+        return false;
+    }
     n->hash = h;
     n->next = s->buckets[b];
     s->buckets[b] = n;
@@ -229,7 +269,9 @@ bool rbl_strset_add(rbl_strset *s, const char *key) {
 /* ---- logging -------------------------------------------------------- */
 
 static bool g_verbose = false;
-void rbl_log_set_verbose(bool v) { g_verbose = v; }
+void rbl_log_set_verbose(bool v) {
+    g_verbose = v;
+}
 
 void rbl_logf(const char *fmt, ...) {
     if (!g_verbose) return;
@@ -260,7 +302,8 @@ void rbl_sleep_ms(long ms) {
 unsigned char *rbl_base64_decode(const char *in, size_t in_len, size_t *out_len) {
     signed char dec[256];
     for (int i = 0; i < 256; i++) dec[i] = -1;
-    const char *abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const char *abc =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     for (int i = 0; i < 64; i++) dec[(unsigned char)abc[i]] = (signed char)i;
 
     unsigned char *out = (unsigned char *)malloc(in_len / 4 * 3 + 4);
@@ -269,7 +312,7 @@ unsigned char *rbl_base64_decode(const char *in, size_t in_len, size_t *out_len)
     int val = 0, bits = 0;
     for (size_t i = 0; i < in_len; i++) {
         unsigned char c = (unsigned char)in[i];
-        if (c == '=' ) break;
+        if (c == '=') break;
         signed char d = dec[c];
         if (d < 0) continue; /* skip whitespace/newlines */
         val = (val << 6) | d;
@@ -302,8 +345,12 @@ char *rbl_base64_encode(const unsigned char *in, size_t in_len) {
     }
     /* padding */
     size_t mod = in_len % 3;
-    if (mod == 1) { out[olen - 1] = '='; out[olen - 2] = '='; }
-    else if (mod == 2) { out[olen - 1] = '='; }
+    if (mod == 1) {
+        out[olen - 1] = '=';
+        out[olen - 2] = '=';
+    } else if (mod == 2) {
+        out[olen - 1] = '=';
+    }
     out[olen] = '\0';
     return out;
 }

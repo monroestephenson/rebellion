@@ -14,8 +14,8 @@
 static bool on_page(const rbl_doc *d, void *user) {
     int *n = (int *)user;
     (*n)++;
-    printf("  crawled: %s  [%d, %s]\n",
-           rbl_doc_url(d), rbl_doc_status_code(d), rbl_doc_engine_used(d));
+    printf("  crawled: %s  [%d, %s]\n", rbl_doc_url(d), rbl_doc_status_code(d),
+           rbl_doc_engine_used(d));
     return *n < 3; /* stop after 3 pages */
 }
 
@@ -27,7 +27,10 @@ int main(int argc, char **argv) {
     cfg.verbose = false;
 
     rbl_client *c = rbl_client_new(&cfg);
-    if (!c) { fprintf(stderr, "out of memory\n"); return 1; }
+    if (!c) {
+        fprintf(stderr, "out of memory\n");
+        return 1;
+    }
 
     /* --- single page --- */
     rbl_scrape_opts o;
@@ -53,8 +56,8 @@ int main(int argc, char **argv) {
     const char *md = rbl_doc_markdown(d);
     size_t preview = md ? strlen(md) : 0;
     if (preview > 500) preview = 500;
-    printf("\n--- Markdown (first %zu chars) ---\n%.*s\n",
-           preview, (int)preview, md ? md : "");
+    printf("\n--- Markdown (first %zu chars) ---\n%.*s\n", preview, (int)preview,
+           md ? md : "");
 
     rbl_doc_free(d);
 
