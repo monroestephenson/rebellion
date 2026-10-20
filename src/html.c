@@ -281,7 +281,9 @@ static rbl_attr *parse_attrs(const char **pp, const char *end, bool *self_closin
 }
 
 /* Consume raw text until the matching </tag>, emitting one text node. */
-static void consume_rawtext(parser *ps, const char *tag, bool decode) {
+/* Consume raw text up to the matching </tag>. When emit is false the text is
+ * skipped (still consumed, so it is never re-parsed as markup). */
+static void consume_rawtext(parser *ps, const char *tag, bool decode, bool emit) {
     const char *p = ps->p, *end = ps->end;
     size_t tlen = strlen(tag);
     const char *text_start = p;
@@ -291,7 +293,8 @@ static void consume_rawtext(parser *ps, const char *tag, bool decode) {
             if ((size_t)(end - q) >= tlen && strncasecmp(q, tag, tlen) == 0) {
                 const char *after = q + tlen;
                 if (after >= end || *after == '>' || isspace((unsigned char)*after)) {
-                    emit_text(ps, text_start, (size_t)(p - text_start), decode);
+                    if (emit)
+                        emit_text(ps, text_start, (size_t)(p - text_start), decode);
                     /* advance past </tag ...> */
                     while (p < end && *p != '>') p++;
                     if (p < end) p++;
@@ -302,7 +305,7 @@ static void consume_rawtext(parser *ps, const char *tag, bool decode) {
         }
         p++;
     }
-    emit_text(ps, text_start, (size_t)(p - text_start), decode);
+    if (emit) emit_text(ps, text_start, (size_t)(p - text_start), decode);
     ps->p = p;
 }
 
@@ -393,16 +396,12 @@ rbl_node *rbl_html_parse(const char *html, size_t len) {
 
         if (is_void(name) || self_closing) {
             /* no children */
-        } else if (is_rawtext(name)) {
-            if (!push(&ps, el)) { /* too deep */
-            }
-            consume_rawtext(&ps, name, false);
-            pop(&ps);
-        } else if (is_escapable_raw(name)) {
-            if (!push(&ps, el)) {
-            }
-            consume_rawtext(&ps, name, true);
-            pop(&ps);
+        } else if (is_rawtext(name) || is_escapable_raw(name)) {
+            /* At the nesting cap the element cannot be pushed; its raw text
+             * is then consumed but dropped rather than misattributed. */
+            bool pushed = push(&ps, el);
+            consume_rawtext(&ps, name, is_escapable_raw(name), pushed);
+            if (pushed) pop(&ps);
         } else {
             if (!push(&ps, el)) {
                 /* Depth exceeded: keep node but don't descend. */

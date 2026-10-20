@@ -11,6 +11,7 @@ int main(void) {
     test_markdown();
     test_robots();
     test_proxy();
+    test_jsonval();
     test_integration();
 
     printf("\n%d checks, %d failed\n", g_tests_run, g_tests_failed);

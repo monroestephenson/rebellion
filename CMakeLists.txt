@@ -14,6 +14,7 @@ endif()
 
 option(REBELLION_BUILD_TESTS "Build the test suite" ON)
 option(REBELLION_BUILD_CLI "Build the rebellion CLI" ON)
+option(REBELLION_BUILD_SERVER "Build the rebellion-server HTTP API" ON)
 option(REBELLION_WERROR "Treat warnings as errors" OFF)
 option(REBELLION_HARDEN "Enable hardening compile/link flags" ON)
 option(REBELLION_FUZZ "Build libFuzzer targets (needs clang)" OFF)
@@ -55,6 +56,7 @@ add_library(rebellion
     src/robots.c
     src/browser.c
     src/json.c
+    src/jsonval.c
     src/scrape.c
     src/crawl.c
 )
@@ -110,6 +112,15 @@ if(REBELLION_BUILD_CLI)
     target_link_libraries(rebellion-cli PRIVATE rebellion)
     target_compile_options(rebellion-cli PRIVATE ${REBELLION_WARNINGS} ${REBELLION_HARDEN_C})
     target_link_options(rebellion-cli PRIVATE ${REBELLION_HARDEN_LD})
+endif()
+
+# ---- HTTP API server -------------------------------------------------------
+if(REBELLION_BUILD_SERVER)
+    add_executable(rebellion-server src/server.c)
+    target_link_libraries(rebellion-server PRIVATE rebellion)
+    target_include_directories(rebellion-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_options(rebellion-server PRIVATE ${REBELLION_WARNINGS} ${REBELLION_HARDEN_C})
+    target_link_options(rebellion-server PRIVATE ${REBELLION_HARDEN_LD})
 endif()
 
 # ---- tests -----------------------------------------------------------------

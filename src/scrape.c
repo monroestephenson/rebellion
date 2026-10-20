@@ -15,6 +15,7 @@
 #include <string.h>
 
 #define RBL_UA_TOKEN "rebellion"
+#define RBL_MAX_CRAWL_DELAY_MS 30000L
 
 struct rbl_doc {
     char *url;
@@ -156,18 +157,11 @@ rbl_doc *rbl_scrape_ex(rbl_client *c, const char *url, const rbl_scrape_opts *op
         return NULL;
     }
 
-    /* Respect robots crawl-delay if larger than our default politeness. */
+    /* Honor a robots.txt Crawl-delay (capped, so a hostile robots.txt cannot
+     * stall us for hours) when it exceeds our default per-host spacing. */
     long cd = o.respect_robots ? rbl_robots_crawl_delay(c, &u, RBL_UA_TOKEN) : -1;
-    if (cd > c->cfg.min_delay_ms) {
-        /* Temporarily honor the longer delay for this host. */
-        rbl_host_state *h = rbl_client_host(c, u.host);
-        if (h) {
-            long long now = rbl_now_ms();
-            if (h->last_hit_ms && now - h->last_hit_ms < cd)
-                rbl_sleep_ms((long)(cd - (now - h->last_hit_ms)));
-        }
-    }
-    rbl_client_rate_limit(c, u.host);
+    if (cd > RBL_MAX_CRAWL_DELAY_MS) cd = RBL_MAX_CRAWL_DELAY_MS;
+    rbl_client_rate_limit(c, u.host, cd > 0 ? cd : 0);
 
     rbl_engine engine = o.engine;
 
@@ -194,8 +188,16 @@ rbl_doc *rbl_scrape_ex(rbl_client *c, const char *url, const rbl_scrape_opts *op
                 }
                 st = RBL_ERR_PARSE;
             }
+        } else if (hs == RBL_OK && !r.is_text) {
+            /* Binary payload (PDF, image, archive...): nothing to convert. */
+            rbl_logf("unsupported content type %s for %s",
+                     r.content_type ? r.content_type : "(none)", url);
+            rbl_http_result_free(&r);
+            rbl_url_free(&u);
+            if (out_status) *out_status = RBL_ERR_UNSUPPORTED_CONTENT;
+            return NULL;
         } else if (hs == RBL_OK && !r.is_html) {
-            /* Non-HTML (e.g. JSON, text). Return it verbatim as markdown. */
+            /* Non-HTML text (JSON, plain text). Return it verbatim. */
             doc = (rbl_doc *)calloc(1, sizeof(*doc));
             if (doc) {
                 doc->url = rbl_strdup(r.final_url);
@@ -211,9 +213,11 @@ rbl_doc *rbl_scrape_ex(rbl_client *c, const char *url, const rbl_scrape_opts *op
         } else {
             st = hs;
             rbl_http_result_free(&r);
-            /* Don't escalate a blocked host to the browser. */
-            if (engine == RBL_ENGINE_AUTO && hs != RBL_ERR_BLOCKED &&
-                rbl_browser_available(c)) {
+            /* Escalate transport-level failures only: a blocked host, an
+             * oversized body or a bad argument won't fare better in a browser. */
+            bool escalate = hs == RBL_ERR_NETWORK || hs == RBL_ERR_TIMEOUT ||
+                            hs == RBL_ERR_TOO_MANY_REDIRECTS;
+            if (engine == RBL_ENGINE_AUTO && escalate && rbl_browser_available(c)) {
                 rbl_logf("auto: HTTP failed (%s), trying browser", rbl_strerror(hs));
                 engine = RBL_ENGINE_BROWSER;
             }
@@ -236,11 +240,12 @@ rbl_doc *rbl_scrape_ex(rbl_client *c, const char *url, const rbl_scrape_opts *op
             char *html = NULL, *final_url = NULL;
             unsigned char *png = NULL;
             size_t png_len = 0;
-            rbl_status rs =
-                rbl_browser_render(c, u.full, &ro, &html, &final_url, &png, &png_len);
+            int code = 0;
+            rbl_status rs = rbl_browser_render(c, u.full, &ro, &html, &final_url, &code,
+                                               &png, &png_len);
             if (rs == RBL_OK && html) {
                 doc = doc_from_html(html, strlen(html), final_url ? final_url : u.full,
-                                    200, "browser", &o);
+                                    code > 0 ? code : 200, "browser", &o);
                 if (doc && png) {
                     doc->png = png;
                     doc->png_len = png_len;
@@ -275,8 +280,24 @@ rbl_doc *rbl_session_scrape(rbl_session *s, const rbl_scrape_opts *opts) {
         o = *opts;
     else
         rbl_scrape_opts_init(&o);
-    rbl_doc *d = doc_from_html(html, strlen(html), url ? url : "", 200, "browser", &o);
+    int code = rbl_session_status_code(s);
+    rbl_doc *d = doc_from_html(html, strlen(html), url ? url : "", code > 0 ? code : 200,
+                               "browser", &o);
     free(html);
+    return d;
+}
+
+rbl_doc *rbl_session_capture(rbl_session *s, const rbl_scrape_opts *opts,
+                             bool screenshot, bool full_page) {
+    rbl_doc *d = rbl_session_scrape(s, opts);
+    if (d && screenshot) {
+        size_t n = 0;
+        unsigned char *png = rbl_session_screenshot(s, full_page, &n);
+        if (png) {
+            d->png = png;
+            d->png_len = n;
+        }
+    }
     return d;
 }
 
@@ -340,14 +361,19 @@ const unsigned char *rbl_doc_screenshot(const rbl_doc *d, size_t *out_len) {
 
 /* ---- JSON ----------------------------------------------------------- */
 
-static void json_kv(rbl_buf *b, const char *key, const char *val, bool *first,
-                    bool pretty) {
-    if (!val) return;
-    if (!*first) rbl_buf_append_str(b, pretty ? ",\n" : ",");
+/* Emit the separator, indentation and `"name":` for the next member. */
+static void json_key(rbl_buf *b, const char *name, bool *first, bool pretty) {
+    if (!*first) rbl_buf_append_ch(b, ',');
     *first = false;
-    if (pretty) rbl_buf_append_str(b, "  ");
-    rbl_json_quote(b, key);
-    rbl_buf_append_str(b, ": ");
+    if (pretty) rbl_buf_append_str(b, "\n  ");
+    rbl_json_quote(b, name);
+    rbl_buf_append_str(b, pretty ? ": " : ":");
+}
+
+static void json_str_member(rbl_buf *b, const char *name, const char *val, bool *first,
+                            bool pretty) {
+    if (!val) return; /* absent fields are omitted */
+    json_key(b, name, first, pretty);
     rbl_json_quote(b, val);
 }
 
@@ -355,49 +381,34 @@ char *rbl_doc_to_json(const rbl_doc *d, bool pretty) {
     if (!d) return NULL;
     rbl_buf b;
     rbl_buf_init(&b);
-    rbl_buf_append_str(&b, pretty ? "{\n" : "{");
     bool first = true;
+    rbl_buf_append_ch(&b, '{');
 
-    json_kv(&b, "url", d->url, &first, pretty);
+    json_str_member(&b, "url", d->url, &first, pretty);
+    json_key(&b, "statusCode", &first, pretty);
+    rbl_buf_appendf(&b, "%d", d->status_code);
+    json_str_member(&b, "engine", d->engine ? d->engine : "http", &first, pretty);
+    json_str_member(&b, "title", d->title, &first, pretty);
+    json_str_member(&b, "description", d->description, &first, pretty);
+    json_str_member(&b, "language", d->language, &first, pretty);
+    json_str_member(&b, "markdown", d->markdown ? d->markdown : "", &first, pretty);
+    json_str_member(&b, "html", d->html, &first, pretty);
 
-    if (!first) rbl_buf_append_str(&b, pretty ? ",\n" : ",");
-    first = false;
-    if (pretty) rbl_buf_append_str(&b, "  ");
-    rbl_json_quote(&b, "statusCode");
-    rbl_buf_appendf(&b, ": %d", d->status_code);
-
-    if (!first) rbl_buf_append_str(&b, pretty ? ",\n" : ",");
-    if (pretty) rbl_buf_append_str(&b, "  ");
-    rbl_json_quote(&b, "engine");
-    rbl_buf_append_str(&b, ": ");
-    rbl_json_quote(&b, d->engine ? d->engine : "http");
-
-    json_kv(&b, "title", d->title, &first, pretty);
-    json_kv(&b, "description", d->description, &first, pretty);
-    json_kv(&b, "language", d->language, &first, pretty);
-    json_kv(&b, "markdown", d->markdown, &first, pretty);
-    if (d->html) json_kv(&b, "html", d->html, &first, pretty);
-
-    /* links array */
-    rbl_buf_append_str(&b, pretty ? ",\n  " : ",");
-    rbl_json_quote(&b, "links");
-    rbl_buf_append_str(&b, ": [");
+    json_key(&b, "links", &first, pretty);
+    rbl_buf_append_ch(&b, '[');
     for (size_t i = 0; i < d->links.count; i++) {
-        if (i) rbl_buf_append_str(&b, ",");
+        if (i) rbl_buf_append_ch(&b, ',');
         if (pretty) rbl_buf_append_str(&b, "\n    ");
         rbl_json_quote(&b, d->links.items[i]);
     }
     if (pretty && d->links.count) rbl_buf_append_str(&b, "\n  ");
-    rbl_buf_append_str(&b, "]");
+    rbl_buf_append_ch(&b, ']');
 
     if (d->png && d->png_len) {
         char *b64 = rbl_base64_encode(d->png, d->png_len);
         if (b64) {
-            rbl_buf_append_str(&b, pretty ? ",\n  " : ",");
-            rbl_json_quote(&b, "screenshot");
-            rbl_buf_append_str(&b, ": ");
-            rbl_buf_append_ch(&b, '"');
-            rbl_buf_append_str(&b, "data:image/png;base64,");
+            json_key(&b, "screenshot", &first, pretty);
+            rbl_buf_append_str(&b, "\"data:image/png;base64,");
             rbl_buf_append_str(&b, b64);
             rbl_buf_append_ch(&b, '"');
             free(b64);
@@ -448,6 +459,12 @@ const char *rbl_strerror(rbl_status s) {
         return "I/O error";
     case RBL_ERR_BLOCKED:
         return "blocked by SSRF guard (private host)";
+    case RBL_ERR_TOO_LARGE:
+        return "response too large";
+    case RBL_ERR_UNSUPPORTED_CONTENT:
+        return "unsupported (binary) content type";
+    case RBL_ERR_BUSY:
+        return "busy: no browser slot available";
     case RBL_ERR_UNSUPPORTED:
         return "unsupported";
     default:

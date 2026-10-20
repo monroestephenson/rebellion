@@ -23,8 +23,8 @@ typedef struct {
  * or taken). Caller frees. */
 rbl_status rbl_browser_render(rbl_client *c, const char *url,
                               const rbl_render_opts *opts, char **out_html,
-                              char **out_final_url, unsigned char **out_png,
-                              size_t *out_png_len);
+                              char **out_final_url, int *out_status_code,
+                              unsigned char **out_png, size_t *out_png_len);
 
 /* True if a usable Chromium was found for this client. */
 bool rbl_browser_available(rbl_client *c);

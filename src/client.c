@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <time.h>
 
 /* A current, realistic desktop Chrome UA. Many sites (German banks included)
  * serve a stripped or blocked page to obvious bot UAs, so we present as a
@@ -21,6 +23,8 @@ void rbl_client_config_init(rbl_client_config *cfg) {
     cfg->min_delay_ms = 250;
     cfg->max_redirects = 10;
     cfg->max_retries = 2;
+    cfg->max_response_bytes = 32u * 1024u * 1024u;
+    cfg->max_concurrent_browsers = 4;
     cfg->chromium_path = NULL;
     cfg->cookie_file = NULL;
     cfg->verbose = false;
@@ -95,10 +99,22 @@ rbl_client *rbl_client_new(const rbl_client_config *cfg_in) {
                                                             : RBL_DEFAULT_ACCEPT_LANG);
     if (c->cfg.default_timeout_ms <= 0) c->cfg.default_timeout_ms = 30000;
     if (c->cfg.max_redirects <= 0) c->cfg.max_redirects = 10;
+    if (c->cfg.max_retries < 0) c->cfg.max_retries = 0;
+    if (c->cfg.max_response_bytes == 0) c->cfg.max_response_bytes = 32u * 1024u * 1024u;
+    if (c->cfg.max_concurrent_browsers <= 0) c->cfg.max_concurrent_browsers = 4;
 
     rbl_log_set_verbose(cfg_in->verbose);
 
     c->chromium_path = detect_chromium(cfg_in->chromium_path);
+    /* Own every string we keep, so callers may pass temporaries. */
+    c->cookie_file = cfg_in->cookie_file ? rbl_strdup(cfg_in->cookie_file) : NULL;
+    c->profile_dir =
+        cfg_in->browser_profile_dir ? rbl_strdup(cfg_in->browser_profile_dir) : NULL;
+    c->cfg.user_agent = c->ua;
+    c->cfg.accept_language = c->accept_language;
+    c->cfg.chromium_path = c->chromium_path;
+    c->cfg.cookie_file = c->cookie_file;
+    c->cfg.browser_profile_dir = c->profile_dir;
     c->proxied = env_set("HTTPS_PROXY") || env_set("https_proxy") ||
                  env_set("ALL_PROXY") || env_set("all_proxy");
 
@@ -106,6 +122,8 @@ rbl_client *rbl_client_new(const rbl_client_config *cfg_in) {
         pthread_mutex_init(&c->share_mtx[i], NULL);
     pthread_mutex_init(&c->host_lock, NULL);
     pthread_mutex_init(&c->proxy_lock, NULL);
+    pthread_mutex_init(&c->browser_lock, NULL);
+    pthread_cond_init(&c->browser_cond, NULL);
 
     c->share = curl_share_init();
     if (c->share) {
@@ -117,7 +135,9 @@ rbl_client *rbl_client_new(const rbl_client_config *cfg_in) {
         curl_share_setopt(c->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
     }
 
-    if (!c->ua || !c->accept_language) {
+    if (!c->ua || !c->accept_language ||
+        (cfg_in->cookie_file && !c->cookie_file) ||
+        (cfg_in->browser_profile_dir && !c->profile_dir)) {
         rbl_client_free(c);
         return NULL;
     }
@@ -131,6 +151,8 @@ void rbl_client_free(rbl_client *c) {
         pthread_mutex_destroy(&c->share_mtx[i]);
     pthread_mutex_destroy(&c->host_lock);
     pthread_mutex_destroy(&c->proxy_lock);
+    pthread_mutex_destroy(&c->browser_lock);
+    pthread_cond_destroy(&c->browser_cond);
     rbl_host_state *h = c->hosts;
     while (h) {
         rbl_host_state *next = h->next;
@@ -144,7 +166,46 @@ void rbl_client_free(rbl_client *c) {
     free(c->ua);
     free(c->accept_language);
     free(c->chromium_path);
+    free(c->cookie_file);
+    free(c->profile_dir);
     free(c);
+}
+
+rbl_status rbl_client_browser_acquire(rbl_client *c, bool persistent_profile,
+                                      long timeout_ms) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    if (timeout_ms < 0) timeout_ms = 0;
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&c->browser_lock);
+    for (;;) {
+        bool slot = c->browsers_active < c->cfg.max_concurrent_browsers;
+        bool prof = !persistent_profile || !c->profile_busy;
+        if (slot && prof) break;
+        if (pthread_cond_timedwait(&c->browser_cond, &c->browser_lock, &deadline) ==
+            ETIMEDOUT) {
+            pthread_mutex_unlock(&c->browser_lock);
+            return RBL_ERR_BUSY;
+        }
+    }
+    c->browsers_active++;
+    if (persistent_profile) c->profile_busy = true;
+    pthread_mutex_unlock(&c->browser_lock);
+    return RBL_OK;
+}
+
+void rbl_client_browser_release(rbl_client *c, bool persistent_profile) {
+    pthread_mutex_lock(&c->browser_lock);
+    if (c->browsers_active > 0) c->browsers_active--;
+    if (persistent_profile) c->profile_busy = false;
+    pthread_cond_broadcast(&c->browser_cond);
+    pthread_mutex_unlock(&c->browser_lock);
 }
 
 rbl_status rbl_client_set_proxies(rbl_client *c, const char *const *proxies, size_t n,
@@ -227,8 +288,9 @@ rbl_host_state *rbl_client_host(rbl_client *c, const char *host) {
     return h;
 }
 
-void rbl_client_rate_limit(rbl_client *c, const char *host) {
+void rbl_client_rate_limit(rbl_client *c, const char *host, long delay_ms) {
     long min_delay = c->cfg.min_delay_ms;
+    if (delay_ms > min_delay) min_delay = delay_ms;
     if (min_delay <= 0) return;
     rbl_host_state *h = rbl_client_host(c, host);
     if (!h) return;

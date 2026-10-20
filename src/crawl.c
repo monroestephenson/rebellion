@@ -4,6 +4,8 @@
 #include "html.h"
 #include "extract.h"
 #include "url.h"
+#include "robots.h"
+#include "net.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -71,12 +73,22 @@ rbl_status rbl_crawl(rbl_client *c, const char *seed_url, const rbl_crawl_opts *
 
     regex_t inc, exc;
     bool have_inc = false, have_exc = false;
-    if (o.include_regex &&
-        regcomp(&inc, o.include_regex, REG_EXTENDED | REG_NOSUB) == 0)
+    /* An invalid filter is a caller error, not "no filter". */
+    if (o.include_regex) {
+        if (regcomp(&inc, o.include_regex, REG_EXTENDED | REG_NOSUB) != 0) {
+            rbl_url_free(&seed);
+            return RBL_ERR_INVALID_ARG;
+        }
         have_inc = true;
-    if (o.exclude_regex &&
-        regcomp(&exc, o.exclude_regex, REG_EXTENDED | REG_NOSUB) == 0)
+    }
+    if (o.exclude_regex) {
+        if (regcomp(&exc, o.exclude_regex, REG_EXTENDED | REG_NOSUB) != 0) {
+            if (have_inc) regfree(&inc);
+            rbl_url_free(&seed);
+            return RBL_ERR_INVALID_ARG;
+        }
         have_exc = true;
+    }
 
     queue q;
     memset(&q, 0, sizeof(q));
@@ -101,8 +113,14 @@ rbl_status rbl_crawl(rbl_client *c, const char *seed_url, const rbl_crawl_opts *
 
         rbl_status st = RBL_OK;
         rbl_doc *doc = rbl_scrape_ex(c, it.url, &o.scrape, &st);
+        if (!doc && fetched == 0 && result == RBL_OK) result = st; /* seed error */
         if (doc) {
             fetched++;
+            /* Mark the landed URL (after redirects) as visited too, so a page
+             * linking to itself is not fetched twice. */
+            char *landed = rbl_url_strip_fragment(rbl_doc_url(doc));
+            if (landed) rbl_strset_add(&visited, landed);
+            free(landed);
             bool keep_going = cb(doc, user);
 
             /* Adopt the landed host from the first page (handles a seed that
@@ -157,7 +175,8 @@ rbl_status rbl_crawl(rbl_client *c, const char *seed_url, const rbl_crawl_opts *
     if (have_inc) regfree(&inc);
     if (have_exc) regfree(&exc);
     rbl_url_free(&seed);
-    return result;
+    /* Success if anything was crawled; otherwise report why the seed failed. */
+    return fetched > 0 ? RBL_OK : (result != RBL_OK ? result : RBL_ERR_NETWORK);
 }
 
 /* ---- map: fast URL discovery ---------------------------------------- */
@@ -200,27 +219,14 @@ static void harvest_sitemap(const char *xml, rbl_strlist *out, rbl_strset *seen,
     }
 }
 
-rbl_status rbl_map(rbl_client *c, const char *seed_url, int max_urls,
-                   rbl_strlist *out) {
-    if (!c || !seed_url || !out) return RBL_ERR_INVALID_ARG;
-    memset(out, 0, sizeof(*out));
-    if (max_urls <= 0) max_urls = 5000;
-
-    rbl_url seed;
-    if (!rbl_url_parse(seed_url, &seed)) return RBL_ERR_BAD_URL;
-
-    rbl_strset seen;
-    rbl_strset_init(&seen);
-
-    /* 1) sitemap.xml (and nested sitemaps one level deep). */
-    rbl_buf sm;
-    rbl_buf_init(&sm);
-    rbl_buf_appendf(&sm, "%s://%s/sitemap.xml", seed.scheme, seed.host);
+/* Fetch one sitemap URL and harvest it; a sitemap index is expanded one
+ * level deep. */
+static void harvest_sitemap_url(rbl_client *c, const char *url, rbl_strlist *out,
+                                rbl_strset *seen, int max_urls) {
     rbl_http_result r;
-    if (rbl_http_get(c, rbl_buf_cstr(&sm), NULL, NULL, 15000, &r) == RBL_OK &&
-        r.http_code >= 200 && r.http_code < 300 && r.body) {
+    if (rbl_http_get(c, url, NULL, NULL, 15000, &r) == RBL_OK && r.http_code >= 200 &&
+        r.http_code < 300 && r.is_text && r.body) {
         if (strstr(r.body, "<sitemapindex")) {
-            /* index of sitemaps: fetch each child <loc> */
             rbl_strlist children;
             memset(&children, 0, sizeof(children));
             rbl_strset cseen;
@@ -230,51 +236,108 @@ rbl_status rbl_map(rbl_client *c, const char *seed_url, int max_urls,
                 rbl_http_result cr;
                 if (rbl_http_get(c, children.items[i], NULL, NULL, 15000, &cr) ==
                         RBL_OK &&
-                    cr.body)
-                    harvest_sitemap(cr.body, out, &seen, max_urls);
+                    cr.is_text && cr.body)
+                    harvest_sitemap(cr.body, out, seen, max_urls);
                 rbl_http_result_free(&cr);
             }
             rbl_strlist_free(&children);
             rbl_strset_free(&cseen);
         } else {
-            harvest_sitemap(r.body, out, &seen, max_urls);
+            harvest_sitemap(r.body, out, seen, max_urls);
         }
     }
     rbl_http_result_free(&r);
-    rbl_buf_free(&sm);
+}
 
-    /* 2) homepage links (same host). */
+rbl_status rbl_map(rbl_client *c, const char *seed_url, int max_urls,
+                   rbl_strlist *out) {
+    if (!c || !seed_url || !out) return RBL_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+    if (max_urls <= 0) max_urls = 5000;
+
+    rbl_url seed;
+    if (!rbl_url_parse(seed_url, &seed)) return RBL_ERR_BAD_URL;
+    if (!c->cfg.allow_private_networks && rbl_host_is_private(seed.host)) {
+        rbl_url_free(&seed);
+        return RBL_ERR_BLOCKED;
+    }
+
+    rbl_strset seen;
+    rbl_strset_init(&seen);
+
+    /* 1) Sitemaps: those declared in robots.txt, then /sitemap.xml. */
+    rbl_strlist sitemaps;
+    memset(&sitemaps, 0, sizeof(sitemaps));
+    rbl_robots_sitemaps(c, &seed, &sitemaps);
+    {
+        rbl_buf sm;
+        rbl_buf_init(&sm);
+        rbl_buf_appendf(&sm, "%s://%s", seed.scheme, seed.host);
+        bool default_port =
+            !seed.port || (!strcmp(seed.scheme, "http") && !strcmp(seed.port, "80")) ||
+            (!strcmp(seed.scheme, "https") && !strcmp(seed.port, "443"));
+        if (!default_port) rbl_buf_appendf(&sm, ":%s", seed.port);
+        rbl_buf_append_str(&sm, "/sitemap.xml");
+        char **ni = realloc(sitemaps.items, (sitemaps.count + 1) * sizeof(char *));
+        if (ni) {
+            sitemaps.items = ni;
+            sitemaps.items[sitemaps.count++] = rbl_buf_steal(&sm);
+        } else {
+            rbl_buf_free(&sm);
+        }
+    }
+    rbl_strset sm_seen;
+    rbl_strset_init(&sm_seen);
+    for (size_t i = 0; i < sitemaps.count && (int)out->count < max_urls; i++)
+        if (sitemaps.items[i] && rbl_strset_add(&sm_seen, sitemaps.items[i]))
+            harvest_sitemap_url(c, sitemaps.items[i], out, &seen, max_urls);
+    rbl_strset_free(&sm_seen);
+    rbl_strlist_free(&sitemaps);
+
+    /* 2) Links on the homepage (same site as the page we land on). */
+    rbl_status home_st = RBL_OK;
     if ((int)out->count < max_urls) {
-        rbl_http_result hr;
-        if (rbl_http_get(c, seed.full, NULL, NULL, 20000, &hr) == RBL_OK &&
-            hr.is_html && hr.body) {
-            rbl_node *root = rbl_html_parse(hr.body, hr.body_len);
-            if (root) {
-                rbl_strlist links;
-                memset(&links, 0, sizeof(links));
-                rbl_collect_links(root, hr.final_url, &links);
-                for (size_t i = 0; i < links.count && (int)out->count < max_urls; i++) {
-                    rbl_url lu;
-                    if (!rbl_url_parse(links.items[i], &lu)) continue;
-                    bool same = rbl_host_matches(lu.host, seed.host, true);
-                    rbl_url_free(&lu);
-                    if (same && rbl_strset_add(&seen, links.items[i])) {
-                        char **ni =
-                            realloc(out->items, (out->count + 1) * sizeof(char *));
-                        if (ni) {
-                            out->items = ni;
-                            out->items[out->count++] = rbl_strdup(links.items[i]);
+        if (!rbl_robots_allowed(c, &seed, "rebellion")) {
+            home_st = RBL_ERR_ROBOTS_DENIED;
+        } else {
+            rbl_http_result hr;
+            home_st = rbl_http_get(c, seed.full, NULL, NULL, 20000, &hr);
+            if (home_st == RBL_OK && hr.is_html && hr.body) {
+                rbl_url landed;
+                bool have_landed = rbl_url_parse(hr.final_url, &landed);
+                const char *scope = have_landed ? landed.host : seed.host;
+                rbl_node *root = rbl_html_parse(hr.body, hr.body_len);
+                if (root) {
+                    rbl_strlist links;
+                    memset(&links, 0, sizeof(links));
+                    rbl_collect_links(root, hr.final_url, &links);
+                    for (size_t i = 0; i < links.count && (int)out->count < max_urls;
+                         i++) {
+                        rbl_url lu;
+                        if (!rbl_url_parse(links.items[i], &lu)) continue;
+                        bool same = rbl_host_matches(lu.host, scope, true);
+                        rbl_url_free(&lu);
+                        if (same && rbl_strset_add(&seen, links.items[i])) {
+                            char **ni =
+                                realloc(out->items, (out->count + 1) * sizeof(char *));
+                            if (ni) {
+                                out->items = ni;
+                                out->items[out->count++] = rbl_strdup(links.items[i]);
+                            }
                         }
                     }
+                    rbl_strlist_free(&links);
+                    rbl_node_free(root);
                 }
-                rbl_strlist_free(&links);
-                rbl_node_free(root);
+                if (have_landed) rbl_url_free(&landed);
             }
+            rbl_http_result_free(&hr);
         }
-        rbl_http_result_free(&hr);
     }
 
     rbl_strset_free(&seen);
     rbl_url_free(&seed);
+    /* Found something: success. Nothing at all: say why the homepage failed. */
+    if (out->count == 0 && home_st != RBL_OK) return home_st;
     return RBL_OK;
 }

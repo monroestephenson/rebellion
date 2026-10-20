@@ -49,6 +49,27 @@ void rbl_json_quote(rbl_buf *b, const char *s) {
     rbl_buf_append_ch(b, '"');
 }
 
+/* Parse exactly four hex digits at p. Reads p[i] only after p[0..i-1] were
+ * valid hex digits, so it never reads beyond a NUL terminator. */
+static bool hex4(const char *p, unsigned long *out) {
+    unsigned long v = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = p[i];
+        int d;
+        if (c >= '0' && c <= '9')
+            d = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            d = c - 'A' + 10;
+        else
+            return false;
+        v = v * 16 + (unsigned long)d;
+    }
+    *out = v;
+    return true;
+}
+
 char *rbl_json_decode_string(const char *p, const char **end) {
     if (!p || *p != '"') return NULL;
     p++;
@@ -89,38 +110,38 @@ char *rbl_json_decode_string(const char *p, const char **end) {
                 rbl_buf_append_ch(&b, '\f');
                 break;
             case 'u': {
-                if (!p[1] || !p[2] || !p[3] || !p[4]) {
-                    p++;
-                    break;
-                }
-                char hex[5] = {p[1], p[2], p[3], p[4], 0};
-                unsigned long cp = strtoul(hex, NULL, 16);
-                /* Handle UTF-16 surrogate pairs. */
-                if (cp >= 0xD800 && cp <= 0xDBFF && p[5] == '\\' && p[6] == 'u') {
-                    char hex2[5] = {p[7], p[8], p[9], p[10], 0};
-                    unsigned long lo = strtoul(hex2, NULL, 16);
-                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                /* hex4() stops at the first non-hex byte (including NUL), so
+                 * a truncated escape can never read past the terminator. */
+                unsigned long cp;
+                if (!hex4(p + 1, &cp)) goto bad;
+                p += 4; /* now at the last hex digit */
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    unsigned long lo;
+                    if (p[1] == '\\' && p[2] == 'u' && hex4(p + 3, &lo) &&
+                        lo >= 0xDC00 && lo <= 0xDFFF) {
                         cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                         p += 6;
+                    } else {
+                        cp = 0xFFFD; /* unpaired high surrogate */
                     }
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                    cp = 0xFFFD; /* unpaired low surrogate */
                 }
                 rbl_utf8_append(&b, cp);
-                p += 4;
                 break;
             }
             default:
-                rbl_buf_append_ch(&b, e);
-                break;
+                goto bad; /* invalid escape (includes a trailing backslash) */
             }
-            if (!*p) break;
             p++;
             continue;
         }
         rbl_buf_append_ch(&b, (char)c);
         p++;
     }
+bad: /* unterminated or malformed */
     rbl_buf_free(&b);
-    return NULL; /* unterminated */
+    return NULL;
 }
 
 const char *rbl_json_find_value(const char *json, const char *name) {

@@ -99,4 +99,53 @@ void test_markdown(void) {
     md = md_of("<p>a*b_c[d]</p>", false);
     CHECK_CONTAINS(md, "a\\*b");
     free(md);
+
+    /* regression: nested inline code keeps document order */
+    md = md_of("<p><code>a<b>B</b>c</code></p>", false);
+    CHECK_CONTAINS(md, "`aBc`");
+    free(md);
+
+    /* regression: nested <pre> keeps document order */
+    md = md_of("<pre><code>x<span>Y</span>z</code></pre>", false);
+    CHECK_CONTAINS(md, "xYz");
+    free(md);
+
+    /* backticks inside inline code use a longer delimiter */
+    md = md_of("<p><code>a`b</code></p>", false);
+    CHECK_CONTAINS(md, "``a`b``");
+    free(md);
+
+    /* a fence inside <pre> cannot break out of the code block */
+    md = md_of("<pre>before\n```\nafter</pre>", false);
+    CHECK_CONTAINS(md, "````\nbefore");
+    free(md);
+
+    /* regression: thousands of children under <code>/<pre> (used to
+     * overflow a fixed-size stack array) */
+    {
+        rbl_buf big;
+        rbl_buf_init(&big);
+        rbl_buf_append_str(&big, "<p><code>");
+        for (int i = 0; i < 5000; i++) rbl_buf_append_str(&big, "<b>x</b>");
+        rbl_buf_append_str(&big, "</code></p><pre>");
+        for (int i = 0; i < 5000; i++) rbl_buf_append_str(&big, "<i>y</i>");
+        rbl_buf_append_str(&big, "</pre>");
+        md = md_of(rbl_buf_cstr(&big), false);
+        CHECK(md != NULL && strlen(md) > 10000);
+        free(md);
+        rbl_buf_free(&big);
+    }
+
+    /* regression: <script> at the nesting cap must not leak into output */
+    {
+        rbl_buf deep;
+        rbl_buf_init(&deep);
+        for (int i = 0; i < 600; i++) rbl_buf_append_str(&deep, "<div>");
+        rbl_buf_append_str(&deep, "<script>SECRETJS()</script>visible");
+        md = md_of(rbl_buf_cstr(&deep), false);
+        CHECK(md && strstr(md, "SECRETJS") == NULL);
+        CHECK_CONTAINS(md, "visible");
+        free(md);
+        rbl_buf_free(&deep);
+    }
 }

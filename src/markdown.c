@@ -16,7 +16,6 @@ typedef struct {
     bool at_bol;    /* at beginning of a line */
     bool want_gap;  /* blank line requested before next content */
     bool pending_space;
-    bool in_pre;
     const char *base;
     bool drop_boiler;
     int list_depth;
@@ -324,28 +323,47 @@ static void render_table(md_ctx *m, rbl_node *n) {
     request_gap(m);
 }
 
+/* Append all descendant text of n, in document order, preserving
+ * whitespace. Recursion depth is bounded by the parser's nesting cap. */
+static void gather_raw_text(rbl_node *n, rbl_buf *b) {
+    for (rbl_node *c = n->first_child; c; c = c->next) {
+        if (c->type == RBL_NODE_TEXT)
+            rbl_buf_append_str(b, c->text);
+        else
+            gather_raw_text(c, b);
+    }
+}
+
+/* Length of the longest run of backticks in s. */
+static size_t max_backtick_run(const char *s) {
+    size_t best = 0, cur = 0;
+    for (; s && *s; s++) {
+        cur = (*s == '`') ? cur + 1 : 0;
+        if (cur > best) best = cur;
+    }
+    return best;
+}
+
 static void render_pre(md_ctx *m, rbl_node *n) {
+    rbl_buf b;
+    rbl_buf_init(&b);
+    gather_raw_text(n, &b);
+    char *code = rbl_buf_cstr(&b);
+    if (!code) return;
+
+    /* The fence must be longer than any backtick run inside the code. */
+    size_t flen = max_backtick_run(code) + 1;
+    if (flen < 3) flen = 3;
+    char fence[64];
+    if (flen >= sizeof(fence)) flen = sizeof(fence) - 1;
+    memset(fence, '`', flen);
+    fence[flen] = '\0';
+
     request_gap(m);
     md_newline(m);
     ensure_line(m);
-    md_raws(m, "```");
+    md_raws(m, fence);
     md_newline(m);
-    /* Gather raw text, preserving whitespace. */
-    rbl_buf b;
-    rbl_buf_init(&b);
-    /* collect all descendant text */
-    rbl_node *dfs[4096];
-    int dn = 0;
-    for (rbl_node *c = n->first_child; c; c = c->next) dfs[dn++] = c;
-    for (int i = 0; i < dn && dn < 4096; i++) {
-        rbl_node *x = dfs[i];
-        if (x->type == RBL_NODE_TEXT)
-            rbl_buf_append_str(&b, x->text);
-        else
-            for (rbl_node *c = x->first_child; c && dn < 4096; c = c->next)
-                dfs[dn++] = c;
-    }
-    char *code = rbl_buf_cstr(&b);
     /* Emit each line with the current prefix. */
     const char *line = code;
     while (*line) {
@@ -361,7 +379,7 @@ static void render_pre(md_ctx *m, rbl_node *n) {
     rbl_buf_free(&b);
     m->at_bol = true;
     ensure_line(m);
-    md_raws(m, "```");
+    md_raws(m, fence);
     request_gap(m);
 }
 
@@ -369,7 +387,7 @@ static void render_pre(md_ctx *m, rbl_node *n) {
 
 static void render_node(md_ctx *m, rbl_node *n) {
     if (n->type == RBL_NODE_TEXT) {
-        if (!m->in_pre) md_text(m, n->text);
+        md_text(m, n->text);
         return;
     }
     if (n->type == RBL_NODE_DOCUMENT) {
@@ -482,32 +500,33 @@ static void render_node(md_ctx *m, rbl_node *n) {
     }
     if (!strcmp(t, "code") || !strcmp(t, "kbd") || !strcmp(t, "samp") ||
         !strcmp(t, "tt")) {
-        md_markup(m, "`");
-        m->pending_space = false;
-        bool pv = m->in_pre;
-        m->in_pre = true; /* don't escape inside code */
-        /* gather text raw */
         rbl_buf b;
         rbl_buf_init(&b);
-        rbl_node *dfs[1024];
-        int dn = 0;
-        for (rbl_node *c = n->first_child; c; c = c->next) dfs[dn++] = c;
-        for (int i = 0; i < dn && dn < 1024; i++) {
-            rbl_node *x = dfs[i];
-            if (x->type == RBL_NODE_TEXT)
-                rbl_buf_append_str(&b, x->text);
-            else
-                for (rbl_node *c = x->first_child; c && dn < 1024; c = c->next)
-                    dfs[dn++] = c;
-        }
+        gather_raw_text(n, &b);
         char *code = rbl_buf_cstr(&b);
-        for (char *p = code; p && *p; p++) {
-            if (*p == '\n' || *p == '\r') *p = ' ';
+        if (!code || !*code) {
+            rbl_buf_free(&b);
+            return;
         }
-        md_raws(m, code ? code : "");
+        for (char *p = code; *p; p++)
+            if (*p == '\n' || *p == '\r' || *p == '\t') *p = ' ';
+
+        /* CommonMark: the delimiter is a backtick run longer than any run in
+         * the content, padded with a space if the content touches a tick. */
+        size_t dlen = max_backtick_run(code) + 1;
+        char delim[64];
+        if (dlen >= sizeof(delim)) dlen = sizeof(delim) - 1;
+        memset(delim, '`', dlen);
+        delim[dlen] = '\0';
+        size_t clen = strlen(code);
+        bool pad = code[0] == '`' || code[clen - 1] == '`';
+
+        md_markup(m, delim);
+        if (pad) md_raws(m, " ");
+        md_raws(m, code);
+        if (pad) md_raws(m, " ");
+        md_raws(m, delim);
         rbl_buf_free(&b);
-        m->in_pre = pv;
-        md_raws(m, "`");
         return;
     }
     if (!strcmp(t, "a")) {

@@ -11,14 +11,18 @@
 
 typedef struct {
     rbl_buf body;
-    char *content_type; /* captured from headers */
+    char *content_type; /* captured from headers of the current hop */
+    size_t max_bytes;
+    bool too_large;
 } fetch_ctx;
 
 static size_t write_body(char *ptr, size_t size, size_t nmemb, void *ud) {
     fetch_ctx *ctx = (fetch_ctx *)ud;
     size_t n = size * nmemb;
-    /* Guard against pathologically large responses (256 MiB). */
-    if (ctx->body.len + n > (size_t)256 * 1024 * 1024) return 0;
+    if (ctx->body.len + n > ctx->max_bytes) {
+        ctx->too_large = true;
+        return 0; /* aborts the transfer with CURLE_WRITE_ERROR */
+    }
     if (!rbl_buf_append(&ctx->body, ptr, n)) return 0;
     return n;
 }
@@ -49,6 +53,53 @@ static bool ct_is_html(const char *ct) {
            strcasestr(ct, "application/rss") || strcasestr(ct, "+xml");
 }
 
+static bool ct_is_text(const char *ct) {
+    if (!ct) return false;
+    return ct_is_html(ct) || strncasecmp(ct, "text/", 5) == 0 ||
+           strcasestr(ct, "json") || strcasestr(ct, "javascript") ||
+           strcasestr(ct, "ecmascript") || strcasestr(ct, "x-www-form-urlencoded");
+}
+
+/* No Content-Type: decide from the bytes. Text if the first KiB has no NUL;
+ * HTML if it starts (after whitespace/BOM) with a tag-ish prefix. */
+static void sniff(const char *data, size_t len, bool *is_text, bool *is_html) {
+    size_t n = len < 1024 ? len : 1024;
+    *is_text = memchr(data, '\0', n) == NULL;
+    *is_html = false;
+    if (!*is_text) return;
+    size_t i = 0;
+    if (len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB &&
+        (unsigned char)data[2] == 0xBF)
+        i = 3;
+    while (i < n && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' ||
+                     data[i] == '\n'))
+        i++;
+    if (i < n && data[i] == '<') {
+        const char *rest = data + i;
+        size_t rl = len - i;
+        *is_html = (rl >= 9 && strncasecmp(rest, "<!doctype", 9) == 0) ||
+                   (rl >= 5 && strncasecmp(rest, "<html", 5) == 0) ||
+                   (rl >= 5 && strncasecmp(rest, "<head", 5) == 0) ||
+                   (rl >= 5 && strncasecmp(rest, "<body", 5) == 0) ||
+                   (rl >= 4 && strncasecmp(rest, "<!--", 4) == 0) ||
+                   (rl >= 5 && strncasecmp(rest, "<?xml", 5) == 0);
+    }
+}
+
+/* Header values must not contain control characters (CR/LF would allow
+ * header injection when the value comes from an API caller). */
+static bool has_ctl(const char *s) {
+    for (; s && *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c < 0x20 && c != '\t') || c == 0x7F) return true;
+    }
+    return false;
+}
+
+static bool is_redirect(long code) {
+    return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+}
+
 /* These options are enum values (not macros), so detect them by libcurl
  * version: PREREQFUNCTION since 7.80.0, PROTOCOLS_STR since 7.85.0. */
 #define RBL_CURL_HAS_PREREQ (LIBCURL_VERSION_NUM >= 0x075000)
@@ -57,8 +108,8 @@ static bool ct_is_html(const char *ct) {
 #if RBL_CURL_HAS_PREREQ
 /* Runs after the connection is established but before the request is sent, so
  * it sees the resolved peer IP and catches DNS names that point at private
- * space. Only installed when no proxy is in use (otherwise the peer IP is the
- * proxy's). */
+ * space. Only installed when the connection is direct (with a proxy the peer
+ * would be the proxy itself). */
 static int prereq_cb(void *clientp, char *conn_primary_ip, char *conn_local_ip,
                      int primary_port, int local_port) {
     (void)conn_local_ip;
@@ -80,36 +131,49 @@ static bool status_transient(rbl_status s, long code) {
     return false;
 }
 
+static rbl_status map_curl_error(CURLcode rc, const fetch_ctx *ctx) {
+    switch (rc) {
+    case CURLE_OPERATION_TIMEDOUT: return RBL_ERR_TIMEOUT;
+    case CURLE_TOO_MANY_REDIRECTS: return RBL_ERR_TOO_MANY_REDIRECTS;
+    case CURLE_URL_MALFORMAT:
+    case CURLE_UNSUPPORTED_PROTOCOL: return RBL_ERR_BAD_URL;
+    case CURLE_ABORTED_BY_CALLBACK: return RBL_ERR_BLOCKED;
+    case CURLE_WRITE_ERROR: return ctx->too_large ? RBL_ERR_TOO_LARGE : RBL_ERR_NETWORK;
+    default: return RBL_ERR_NETWORK;
+    }
+}
+
 static rbl_status do_fetch(rbl_client *c, const char *url, const char *ua,
                            const char *al, const char *proxy, long timeout_ms,
                            rbl_http_result *out) {
+    memset(out, 0, sizeof(*out));
     CURL *h = curl_easy_init();
     if (!h) return RBL_ERR_OOM;
 
     fetch_ctx ctx;
     rbl_buf_init(&ctx.body);
     ctx.content_type = NULL;
+    ctx.max_bytes = c->cfg.max_response_bytes;
+    ctx.too_large = false;
 
     struct curl_slist *hdrs = NULL;
-    char al_hdr[256];
+    char al_hdr[512];
     snprintf(al_hdr, sizeof(al_hdr), "Accept-Language: %s", al);
     hdrs = curl_slist_append(
         hdrs, "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,"
               "image/avif,image/webp,*/*;q=0.8");
     hdrs = curl_slist_append(hdrs, al_hdr);
-    hdrs = curl_slist_append(hdrs, "Accept-Encoding: gzip, deflate, br, zstd");
     hdrs = curl_slist_append(hdrs, "Sec-Fetch-Dest: document");
     hdrs = curl_slist_append(hdrs, "Sec-Fetch-Mode: navigate");
     hdrs = curl_slist_append(hdrs, "Sec-Fetch-Site: none");
     hdrs = curl_slist_append(hdrs, "Sec-Fetch-User: ?1");
     hdrs = curl_slist_append(hdrs, "Upgrade-Insecure-Requests: 1");
 
-    curl_easy_setopt(h, CURLOPT_URL, url);
     curl_easy_setopt(h, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(h, CURLOPT_USERAGENT, ua);
-    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, ""); /* let curl advertise+decode */
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_MAXREDIRS, (long)c->cfg.max_redirects);
+    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, ""); /* advertise + decode all */
+    /* Redirects are followed manually below so every hop can be vetted. */
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS,
                      timeout_ms < 15000 ? timeout_ms : 15000L);
@@ -122,8 +186,7 @@ static rbl_status do_fetch(rbl_client *c, const char *url, const char *ua,
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
 
-    /* Restrict to http/https for both the request and any redirect target,
-     * so a crafted Location: cannot pivot to file://, gopher://, etc. */
+    /* Only http/https, for the request and anything it points at. */
 #if RBL_CURL_HAS_PROTO_STR
     curl_easy_setopt(h, CURLOPT_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(h, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
@@ -133,95 +196,119 @@ static rbl_status do_fetch(rbl_client *c, const char *url, const char *ua,
                      (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
 #endif
 
-    /* SSRF guard on the resolved peer IP (covers redirects + DNS targets).
-     * Skipped when proxied, since the peer would be the proxy itself. */
+    bool via_proxy = c->proxied || (proxy && *proxy);
 #if RBL_CURL_HAS_PREREQ
-    if (!c->proxied && !c->cfg.allow_private_networks) {
+    /* Peer-IP SSRF check: only meaningful for direct connections. */
+    if (!via_proxy && !c->cfg.allow_private_networks) {
         curl_easy_setopt(h, CURLOPT_PREREQFUNCTION, prereq_cb);
         curl_easy_setopt(h, CURLOPT_PREREQDATA, c);
     }
 #endif
-    /* Proxy environment (HTTPS_PROXY) is honored by libcurl automatically. */
+    (void)via_proxy;
     if (c->share) curl_easy_setopt(h, CURLOPT_SHARE, c->share);
-    /* Explicit proxy from the pool overrides any environment proxy. */
+    /* An explicit pool proxy overrides the environment proxy. */
     if (proxy && *proxy) curl_easy_setopt(h, CURLOPT_PROXY, proxy);
-    /* In-memory cookie engine (or a file if configured). */
-    curl_easy_setopt(h, CURLOPT_COOKIEFILE,
-                     c->cfg.cookie_file ? c->cfg.cookie_file : "");
+    curl_easy_setopt(h, CURLOPT_COOKIEFILE, c->cfg.cookie_file ? c->cfg.cookie_file : "");
     if (c->cfg.cookie_file) curl_easy_setopt(h, CURLOPT_COOKIEJAR, c->cfg.cookie_file);
 
-    CURLcode rc = curl_easy_perform(h);
-
     rbl_status st = RBL_OK;
-    if (rc != CURLE_OK) {
-        switch (rc) {
-        case CURLE_OPERATION_TIMEDOUT:
-            st = RBL_ERR_TIMEOUT;
-            break;
-        case CURLE_TOO_MANY_REDIRECTS:
-            st = RBL_ERR_TOO_MANY_REDIRECTS;
-            break;
-        case CURLE_URL_MALFORMAT:
-            st = RBL_ERR_BAD_URL;
-            break;
-        case CURLE_UNSUPPORTED_PROTOCOL:
-            st = RBL_ERR_BAD_URL;
-            break;
-        case CURLE_ABORTED_BY_CALLBACK:
-            st = RBL_ERR_BLOCKED;
-            break;
-        default:
-            st = RBL_ERR_NETWORK;
+    char *cur = rbl_strdup(url);
+    long code = 0;
+    int hops = 0;
+    for (;;) {
+        rbl_buf_reset(&ctx.body);
+        free(ctx.content_type);
+        ctx.content_type = NULL;
+        ctx.too_large = false;
+
+        curl_easy_setopt(h, CURLOPT_URL, cur);
+        CURLcode rc = curl_easy_perform(h);
+        if (rc != CURLE_OK) {
+            st = map_curl_error(rc, &ctx);
+            rbl_logf("curl error on %s: %s", cur, curl_easy_strerror(rc));
             break;
         }
-        rbl_logf("curl error on %s: %s", url, curl_easy_strerror(rc));
+        curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
+        if (!is_redirect(code)) break;
+
+        char *loc = NULL;
+        curl_easy_getinfo(h, CURLINFO_REDIRECT_URL, &loc);
+        if (!loc || !*loc) break; /* 3xx without Location: treat as final */
+        if (++hops > c->cfg.max_redirects) {
+            st = RBL_ERR_TOO_MANY_REDIRECTS;
+            break;
+        }
+        rbl_url ru;
+        if (!rbl_url_parse(loc, &ru)) { /* not http(s), or malformed */
+            st = RBL_ERR_BAD_URL;
+            break;
+        }
+        rbl_url_free(&ru);
+        if (!c->cfg.allow_private_networks && rbl_url_host_is_private(loc)) {
+            rbl_logf("SSRF guard: refusing redirect to private host %s", loc);
+            st = RBL_ERR_BLOCKED;
+            break;
+        }
+        char *next = rbl_strdup(loc); /* loc is owned by the handle */
+        free(cur);
+        cur = next;
+        if (!cur) {
+            st = RBL_ERR_OOM;
+            break;
+        }
     }
 
-    long code = 0;
-    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
-    char *eff = NULL;
-    curl_easy_getinfo(h, CURLINFO_EFFECTIVE_URL, &eff);
-
-    memset(out, 0, sizeof(*out));
     out->http_code = code;
-    out->final_url = rbl_strdup(eff ? eff : url);
-    out->content_type = ctx.content_type; /* transfer ownership */
-    out->is_html = ct_is_html(ctx.content_type);
+    out->final_url = cur; /* transfer ownership */
+    out->content_type = ctx.content_type;
+    ctx.content_type = NULL;
 
     if (st == RBL_OK) {
-        /* Decode to UTF-8 using header charset, then HTML meta sniffing. */
-        char *cs = rbl_charset_from_content_type(ctx.content_type);
-        if (!cs && out->is_html)
-            cs =
-                rbl_charset_from_html(ctx.body.data ? ctx.body.data : "", ctx.body.len);
-        size_t ol = 0;
-        out->body =
-            rbl_to_utf8(ctx.body.data ? ctx.body.data : "", ctx.body.len, cs, &ol);
-        out->body_len = ol;
-        free(cs);
+        if (out->content_type) {
+            out->is_html = ct_is_html(out->content_type);
+            out->is_text = ct_is_text(out->content_type);
+        } else {
+            sniff(ctx.body.data ? ctx.body.data : "", ctx.body.len, &out->is_text,
+                  &out->is_html);
+        }
+        if (out->is_text) {
+            /* Decode to UTF-8 using header charset, then <meta> sniffing. */
+            char *cs = rbl_charset_from_content_type(out->content_type);
+            if (!cs && out->is_html)
+                cs = rbl_charset_from_html(ctx.body.data ? ctx.body.data : "",
+                                           ctx.body.len);
+            size_t ol = 0;
+            out->body =
+                rbl_to_utf8(ctx.body.data ? ctx.body.data : "", ctx.body.len, cs, &ol);
+            out->body_len = ol;
+            free(cs);
+        } else {
+            out->body = rbl_strdup(""); /* binary payloads are not decoded */
+            out->body_len = 0;
+        }
     }
     rbl_buf_free(&ctx.body);
-
+    free(ctx.content_type);
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(h);
-
-    if (st != RBL_OK) return st;
-    return RBL_OK;
+    return st;
 }
 
 rbl_status rbl_http_get(rbl_client *c, const char *url, const char *ua, const char *al,
                         long timeout_ms, rbl_http_result *out) {
-    if (!c || !url || !out) return RBL_ERR_INVALID_ARG;
+    if (!out) return RBL_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+    if (!c || !url) return RBL_ERR_INVALID_ARG;
 
     /* SSRF guard: reject loopback/private literal hosts up front. */
     if (!c->cfg.allow_private_networks && rbl_url_host_is_private(url)) {
         rbl_logf("SSRF guard: refusing private host in %s", url);
-        memset(out, 0, sizeof(*out));
         return RBL_ERR_BLOCKED;
     }
 
     if (!ua) ua = c->ua;
     if (!al) al = c->accept_language;
+    if (has_ctl(ua) || has_ctl(al)) return RBL_ERR_INVALID_ARG;
     if (timeout_ms <= 0) timeout_ms = c->cfg.default_timeout_ms;
 
     /* Host for sticky-per-host proxy selection. */

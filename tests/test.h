@@ -49,6 +49,7 @@ void test_url(void);
 void test_robots(void);
 void test_html(void);
 void test_proxy(void);
+void test_jsonval(void);
 void test_integration(void);
 
 #endif

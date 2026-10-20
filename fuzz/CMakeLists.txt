@@ -9,8 +9,10 @@
 # The library picks up coverage/sanitizer instrumentation from CMAKE_C_FLAGS;
 # the target below just adds the libFuzzer driver.
 
-add_executable(fuzz_html fuzz_html.c)
-target_link_libraries(fuzz_html PRIVATE rebellion)
-target_include_directories(fuzz_html PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_options(fuzz_html PRIVATE -fsanitize=fuzzer)
-target_link_options(fuzz_html PRIVATE -fsanitize=fuzzer)
+foreach(target fuzz_html fuzz_json)
+    add_executable(${target} ${target}.c)
+    target_link_libraries(${target} PRIVATE rebellion)
+    target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
+    target_link_options(${target} PRIVATE -fsanitize=fuzzer)
+endforeach()

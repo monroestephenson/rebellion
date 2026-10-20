@@ -39,7 +39,10 @@ typedef enum {
     RBL_ERR_PARSE,
     RBL_ERR_IO,
     RBL_ERR_BLOCKED,       /* URL blocked by the SSRF guard (private host)  */
-    RBL_ERR_UNSUPPORTED
+    RBL_ERR_UNSUPPORTED,   /* feature unavailable (e.g. no Chromium found)  */
+    RBL_ERR_TOO_LARGE,     /* response exceeded max_response_bytes          */
+    RBL_ERR_UNSUPPORTED_CONTENT, /* binary content (PDF, image, ...)        */
+    RBL_ERR_BUSY           /* no browser slot became free in time           */
 } rbl_status;
 
 const char *rbl_strerror(rbl_status s);
@@ -108,6 +111,14 @@ typedef struct rbl_client_config {
      * persist — "authenticated profiles". NULL => a throwaway profile that is
      * deleted after each render. */
     const char *browser_profile_dir;
+
+    /* Resource limits. 0 => default. */
+    size_t max_response_bytes;    /* per HTTP response body, default 32 MiB */
+    int max_concurrent_browsers;  /* headless Chromium instances alive at
+                                   * once across all threads, default 4.
+                                   * Each one costs hundreds of MB of RAM.
+                                   * Sessions using a persistent profile are
+                                   * additionally serialized (one at a time). */
 } rbl_client_config;
 
 void rbl_client_config_init(rbl_client_config *cfg);
@@ -206,11 +217,15 @@ void rbl_strlist_free(rbl_strlist *l);
 typedef struct rbl_session rbl_session;
 
 typedef struct rbl_session_opts {
-    const char *proxy;           /* override the client's proxy for this session */
+    const char *proxy;           /* override the client's proxy for this session.
+                                  * Credentials (user:pass@) are supported for
+                                  * http/https proxies, not for SOCKS.          */
     const char *user_agent;
     const char *accept_language;
     const char *profile_dir;     /* override client browser_profile_dir          */
     long timeout_ms;             /* default per-action budget (0 => 45000)       */
+    bool respect_robots;         /* check robots.txt on goto (default false:
+                                  * a session is user-driven, like a browser)    */
 } rbl_session_opts;
 
 void rbl_session_opts_init(rbl_session_opts *opts);
@@ -220,8 +235,18 @@ rbl_session *rbl_session_open(rbl_client *c, const rbl_session_opts *opts,
                               rbl_status *out_status);
 void rbl_session_close(rbl_session *s);
 
-/* Navigate and wait for load; settle_ms is extra quiet time (<0 => default). */
+/* Navigate (http/https only) and wait for load; settle_ms is extra quiet time
+ * (<0 => default). Fails with RBL_ERR_BLOCKED if the SSRF guard stops the
+ * navigation (including redirects to private hosts) and with a network error
+ * if the page could not be loaded. */
 rbl_status rbl_session_goto(rbl_session *s, const char *url, long settle_ms);
+
+/* RBL_ERR_BLOCKED if a later navigation (e.g. triggered by a click) was
+ * stopped by the SSRF guard, else RBL_OK. Captures fail in that state. */
+rbl_status rbl_session_last_error(rbl_session *s);
+
+/* HTTP status of the current page's main document (0 if unknown). */
+int rbl_session_status_code(rbl_session *s);
 
 /* Actions (CSS selectors). Each returns RBL_OK, RBL_ERR_PARSE if the selector
  * matches nothing, or a transport/render error. */
@@ -248,6 +273,11 @@ const char *rbl_session_url(rbl_session *s);            /* owned by session     
 /* Build a document (markdown/links/metadata) from the session's current page,
  * honoring opts (engine field is ignored). Caller frees with rbl_doc_free. */
 rbl_doc *rbl_session_scrape(rbl_session *s, const rbl_scrape_opts *opts);
+
+/* Like rbl_session_scrape, but also attaches a screenshot to the document
+ * when screenshot is true (visible via rbl_doc_screenshot / rbl_doc_to_json). */
+rbl_doc *rbl_session_capture(rbl_session *s, const rbl_scrape_opts *opts,
+                             bool screenshot, bool full_page);
 
 #ifdef __cplusplus
 }

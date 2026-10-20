@@ -14,6 +14,9 @@ bool rbl_robots_allowed(rbl_client *c, const rbl_url *u, const char *ua_token);
 /* Parse a crawl-delay (seconds) for the host, or -1 if none. */
 long rbl_robots_crawl_delay(rbl_client *c, const rbl_url *u, const char *ua_token);
 
+/* Append the absolute "Sitemap:" URLs listed in the origin's robots.txt. */
+void rbl_robots_sitemaps(rbl_client *c, const rbl_url *u, rbl_strlist *out);
+
 /* Exposed for testing: does `path` match a robots.txt rule `pattern`
  * (supporting '*' wildcards and a trailing '$' anchor)? */
 bool rbl_robots_path_match(const char *pattern, const char *path);

@@ -8,49 +8,68 @@
 #include <ctype.h>
 #include <pthread.h>
 
-/* Fetch (once) and cache robots.txt for the host. Returns the cached body or
- * NULL if there is none. */
-static const char *get_robots(rbl_client *c, const rbl_url *u) {
-    rbl_host_state *h = rbl_client_host(c, u->host);
-    if (!h) return NULL;
+/* robots.txt is cached per origin for at most this long (RFC 9309 allows up
+ * to 24h); long-running servers therefore pick up changes. */
+#define RBL_ROBOTS_TTL_MS (60LL * 60 * 1000)
+
+/* "scheme://host[:port]" with the port omitted when it is the default. */
+static char *origin_of(const rbl_url *u) {
+    rbl_buf b;
+    rbl_buf_init(&b);
+    rbl_buf_appendf(&b, "%s://%s", u->scheme, u->host);
+    if (u->port && *u->port) {
+        bool is_default = (rbl_streq_ci(u->scheme, "http") && strcmp(u->port, "80") == 0) ||
+                          (rbl_streq_ci(u->scheme, "https") && strcmp(u->port, "443") == 0);
+        if (!is_default) rbl_buf_appendf(&b, ":%s", u->port);
+    }
+    return rbl_buf_steal(&b);
+}
+
+/* Return a heap copy of the origin's robots.txt (caller frees), or NULL when
+ * there is none (missing/unreachable => allow all). Copies are returned
+ * because the cached body may be replaced by a refresh on another thread. */
+static char *get_robots(rbl_client *c, const rbl_url *u) {
+    char *origin = origin_of(u);
+    if (!origin) return NULL;
+    rbl_buf key;
+    rbl_buf_init(&key);
+    rbl_buf_appendf(&key, "robots:%s", origin);
+    rbl_host_state *h = rbl_client_host(c, rbl_buf_cstr(&key));
+    rbl_buf_free(&key);
+    if (!h) {
+        free(origin);
+        return NULL;
+    }
 
     pthread_mutex_lock(&c->host_lock);
-    bool done = h->robots_fetched;
-    const char *cached = h->robots_body;
+    bool fresh = h->robots_fetched && rbl_now_ms() - h->robots_fetched_ms < RBL_ROBOTS_TTL_MS;
+    char *copy = (fresh && h->robots_body) ? rbl_strdup(h->robots_body) : NULL;
     pthread_mutex_unlock(&c->host_lock);
-    if (done) return cached;
+    if (fresh) {
+        free(origin);
+        return copy;
+    }
 
-    /* Build robots URL: scheme://host[:port]/robots.txt */
     rbl_buf url;
     rbl_buf_init(&url);
-    rbl_buf_appendf(&url, "%s://%s", u->scheme, u->host);
-    if (u->port && *u->port) {
-        bool is_default =
-            (rbl_streq_ci(u->scheme, "http") && strcmp(u->port, "80") == 0) ||
-            (rbl_streq_ci(u->scheme, "https") && strcmp(u->port, "443") == 0);
-        if (!is_default) rbl_buf_appendf(&url, ":%s", u->port);
-    }
-    rbl_buf_append_str(&url, "/robots.txt");
-
+    rbl_buf_appendf(&url, "%s/robots.txt", origin);
+    free(origin);
     char *body = NULL;
     rbl_http_result r;
     rbl_status st = rbl_http_get(c, rbl_buf_cstr(&url), NULL, NULL, 15000, &r);
-    if (st == RBL_OK && r.http_code >= 200 && r.http_code < 300 && r.body)
+    if (st == RBL_OK && r.http_code >= 200 && r.http_code < 300 && r.is_text && r.body)
         body = rbl_strdup(r.body);
     rbl_http_result_free(&r);
     rbl_buf_free(&url);
 
     pthread_mutex_lock(&c->host_lock);
-    if (!h->robots_fetched) {
-        h->robots_body = body; /* may be NULL => allow all */
-        h->robots_fetched = true;
-        cached = h->robots_body;
-    } else {
-        free(body);
-        cached = h->robots_body;
-    }
+    free(h->robots_body);
+    h->robots_body = body; /* may be NULL => allow all */
+    h->robots_fetched = true;
+    h->robots_fetched_ms = rbl_now_ms();
+    copy = body ? rbl_strdup(body) : NULL;
     pthread_mutex_unlock(&c->host_lock);
-    return cached;
+    return copy;
 }
 
 /* A line iterator over robots.txt content. */
@@ -216,7 +235,9 @@ static void eval_robots(const char *content, const char *path, const char *ua_to
                 continue;
             }
             if (robots_match(v, vl, path)) {
-                if (vl >= out->best_len) {
+                /* Longest match wins; on a tie, Allow wins (RFC 9309). */
+                if (!out->have_match || vl > out->best_len ||
+                    (vl == out->best_len && allow)) {
                     out->best_len = vl;
                     out->best_allow = allow;
                     out->have_match = true;
@@ -225,6 +246,9 @@ static void eval_robots(const char *content, const char *path, const char *ua_to
         } else if (key_is(k, kl, "crawl-delay")) {
             char *s = rbl_strndup(v, vl);
             double d = atof(s);
+            /* Clamp before converting: robots.txt is untrusted and a huge
+             * value would overflow the conversion to long. */
+            if (d > 3600.0) d = 3600.0;
             if (d > 0) out->crawl_delay = (long)(d * 1000.0);
             free(s);
         }
@@ -243,20 +267,58 @@ bool rbl_robots_eval_allowed(const char *content, const char *path,
     return ev.best_allow;
 }
 
+/* Rules match against the path plus query string (RFC 9309). */
+static char *path_and_query(const rbl_url *u) {
+    rbl_buf b;
+    rbl_buf_init(&b);
+    rbl_buf_append_str(&b, (u->path && *u->path) ? u->path : "/");
+    if (u->query && *u->query) rbl_buf_appendf(&b, "?%s", u->query);
+    return rbl_buf_steal(&b);
+}
+
 bool rbl_robots_allowed(rbl_client *c, const rbl_url *u, const char *ua_token) {
-    const char *content = get_robots(c, u);
+    char *content = get_robots(c, u);
     if (!content) return true;
-    const char *path = (u->path && *u->path) ? u->path : "/";
+    char *pq = path_and_query(u);
     robots_eval ev;
-    eval_robots(content, path, ua_token, &ev);
+    eval_robots(content, pq ? pq : "/", ua_token, &ev);
+    free(pq);
+    free(content);
     return ev.best_allow;
 }
 
+void rbl_robots_sitemaps(rbl_client *c, const rbl_url *u, rbl_strlist *out) {
+    char *content = get_robots(c, u);
+    if (!content) return;
+    liter it;
+    it.p = content;
+    const char *k, *v;
+    size_t kl, vl;
+    while (next_line(&it, &k, &kl, &v, &vl)) {
+        /* "Sitemap: <url>" — the URL itself contains ':', so next_line splits
+         * at the first colon, which is the key separator. */
+        if (!key_is(k, kl, "sitemap") || vl == 0) continue;
+        char *url = rbl_strndup(v, vl);
+        if (!url) break;
+        if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0) {
+            char **ni = realloc(out->items, (out->count + 1) * sizeof(char *));
+            if (ni) {
+                out->items = ni;
+                out->items[out->count++] = url;
+                url = NULL;
+            }
+        }
+        free(url);
+    }
+    free(content);
+}
+
 long rbl_robots_crawl_delay(rbl_client *c, const rbl_url *u, const char *ua_token) {
-    const char *content = get_robots(c, u);
+    char *content = get_robots(c, u);
     if (!content) return -1;
     const char *path = (u->path && *u->path) ? u->path : "/";
     robots_eval ev;
     eval_robots(content, path, ua_token, &ev);
+    free(content);
     return ev.crawl_delay;
 }

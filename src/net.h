@@ -15,6 +15,10 @@ bool rbl_ip_is_private(const char *ip);
  * time by the libcurl pre-request hook. */
 bool rbl_host_is_private(const char *host);
 
+/* Resolve `host` and return true if any address it resolves to is private.
+ * Returns false if it does not resolve (the fetch will then fail anyway). */
+bool rbl_host_resolves_private(const char *host);
+
 /* Parse the host out of `url` (http/https) and apply rbl_host_is_private.
  * Returns true if the URL's host is blocked. Malformed URLs return false
  * (they will simply fail to fetch). */

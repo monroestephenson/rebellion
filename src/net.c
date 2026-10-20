@@ -7,6 +7,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <netdb.h>
+#include <sys/socket.h>
 
 static bool ipv4_is_private(uint32_t a /* host byte order */) {
     uint8_t b0 = (a >> 24) & 0xFF, b1 = (a >> 16) & 0xFF;
@@ -98,4 +100,27 @@ bool rbl_url_host_is_private(const char *url) {
     }
     curl_url_cleanup(h);
     return blocked;
+}
+
+bool rbl_host_resolves_private(const char *host) {
+    if (!host || !*host) return true;
+    if (rbl_host_is_private(host)) return true;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return false;
+    bool priv = false;
+    for (struct addrinfo *a = res; a && !priv; a = a->ai_next) {
+        char ip[INET6_ADDRSTRLEN];
+        const void *src = NULL;
+        if (a->ai_family == AF_INET)
+            src = &((struct sockaddr_in *)a->ai_addr)->sin_addr;
+        else if (a->ai_family == AF_INET6)
+            src = &((struct sockaddr_in6 *)a->ai_addr)->sin6_addr;
+        if (src && inet_ntop(a->ai_family, src, ip, sizeof(ip)))
+            priv = rbl_ip_is_private(ip);
+    }
+    freeaddrinfo(res);
+    return priv;
 }
