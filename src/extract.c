@@ -1,4 +1,5 @@
 #include "extract.h"
+#include "markdown.h"
 #include "url.h"
 #include "util.h"
 
@@ -157,13 +158,12 @@ static void density(rbl_node *n, size_t *text, size_t *linktext, int in_link) {
         density(c, text, linktext, in_link);
 }
 
-static bool is_boilerplate_tag(const char *t) {
-    static const char *const v[] = {"nav",    "header", "footer",   "aside",
-                                    "script", "style",  "noscript", "form",
-                                    "svg",    "button", "iframe",   NULL};
+static bool is_boilerplate(const rbl_node *n) {
+    static const char *const v[] = {"aside", "script", "style",  "noscript", "form",
+                                    "svg",   "button", "iframe", NULL};
     for (int i = 0; v[i]; i++)
-        if (strcmp(t, v[i]) == 0) return true;
-    return false;
+        if (strcmp(n->tag, v[i]) == 0) return true;
+    return rbl_node_is_page_chrome(n);
 }
 
 static long score_node(rbl_node *n) {
@@ -180,7 +180,7 @@ static long score_node(rbl_node *n) {
 static rbl_node *best_block(rbl_node *n, long *best_score, rbl_node *best) {
     if (!n) return best;
     if (n->type == RBL_NODE_ELEMENT && n->tag) {
-        if (is_boilerplate_tag(n->tag)) return best; /* don't descend */
+        if (is_boilerplate(n)) return best; /* don't descend */
         static const char *const containers[] = {"article", "main", "section",
                                                  "div",     "td",   NULL};
         bool is_container = false;
@@ -229,4 +229,87 @@ rbl_node *rbl_find_main_content(rbl_node *root) {
     if (best) return best;
     rbl_node *body = find_first_tag(root, "body");
     return body ? body : root;
+}
+
+/* ---- the page's headline -------------------------------------------- */
+
+static bool is_ancestor_or_self(const rbl_node *a, const rbl_node *n) {
+    for (; n; n = n->parent)
+        if (n == a) return true;
+    return false;
+}
+
+static bool lead_skip(const rbl_node *n) {
+    static const char *const v[] = {"script", "style", "noscript", "template", NULL};
+    for (int i = 0; v[i]; i++)
+        if (rbl_node_is(n, v[i])) return true;
+    const char *ah = rbl_node_attr(n, "aria-hidden");
+    return rbl_node_attr(n, "hidden") || (ah && rbl_streq_ci(ah, "true"));
+}
+
+/* The first <h1> with real text that is not just a linked logo. Page chrome
+ * is skipped unless `in_chrome` (a hero <header> can sit at page level). */
+static rbl_node *first_h1(rbl_node *n, bool in_chrome) {
+    if (!n) return NULL;
+    if (n->type == RBL_NODE_ELEMENT && n->tag) {
+        if (lead_skip(n) || rbl_node_is(n, "nav")) return NULL;
+        if (!in_chrome && rbl_node_is_page_chrome(n)) return NULL;
+        if (rbl_node_is(n, "h1")) {
+            size_t text = 0, linktext = 0;
+            density(n, &text, &linktext, 0);
+            return (text > 0 && linktext * 2 < text) ? n : NULL;
+        }
+    }
+    for (rbl_node *c = n->first_child; c; c = c->next) {
+        rbl_node *r = first_h1(c, in_chrome);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* -1 if `a` comes first in document order, 1 if `b` does, 0 if neither. */
+static int doc_order(const rbl_node *n, const rbl_node *a, const rbl_node *b) {
+    if (n == a) return -1;
+    if (n == b) return 1;
+    for (const rbl_node *c = n->first_child; c; c = c->next) {
+        int r = doc_order(c, a, b);
+        if (r) return r;
+    }
+    return 0;
+}
+
+rbl_node *rbl_find_lead(rbl_node *root, rbl_node *content) {
+    if (!root || !content || content == root) return NULL;
+    rbl_node *h1 = first_h1(root, false);
+    if (!h1) h1 = first_h1(root, true);
+    if (!h1 || is_ancestor_or_self(content, h1) || is_ancestor_or_self(h1, content))
+        return NULL;
+    if (doc_order(root, h1, content) != -1) return NULL; /* headline comes first */
+
+    /* Widen to the block around the headline (its intro, the offer line) up
+     * to where it meets the content's branch, unless that block is mostly
+     * links, e.g. a site header with a menu. */
+    rbl_node *block = h1;
+    while (block->parent && !is_ancestor_or_self(block->parent, content))
+        block = block->parent;
+    size_t text = 0, linktext = 0;
+    density(block, &text, &linktext, 0);
+    return (text <= 3000 && linktext * 2 <= text) ? block : h1;
+}
+
+char *rbl_main_content_markdown(rbl_node *root, const char *base_url) {
+    rbl_node *content = rbl_find_main_content(root);
+    char *md = rbl_render_markdown(content, base_url, true);
+    rbl_node *lead = rbl_find_lead(root, content);
+    if (!md || !lead) return md;
+    char *head = rbl_render_markdown(lead, base_url, true);
+    if (!head) return md;
+    rbl_buf b;
+    rbl_buf_init(&b);
+    rbl_buf_append_str(&b, head);
+    rbl_buf_append_str(&b, "\n");
+    rbl_buf_append_str(&b, md);
+    free(head);
+    free(md);
+    return rbl_buf_steal(&b);
 }

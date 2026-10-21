@@ -12,6 +12,7 @@ int main(void) {
     test_robots();
     test_proxy();
     test_net();
+    test_extract();
     test_jsonval();
     test_integration();
 

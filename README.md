@@ -32,9 +32,12 @@ needs to be.
 - **Clean Markdown** output: headings, bold/italic, links (resolved to
   absolute URLs), images, ordered/unordered/nested lists, blockquotes,
   fenced code, and GitHub-style tables.
-- **Main-content extraction**: a readability-style heuristic drops nav,
-  headers, footers, asides, forms, scripts and styles and keeps the article
-  body (toggle with `--full-page-content`).
+- **Main-content extraction**: a readability-style heuristic keeps the
+  article body and drops site chrome — navigation, the site-wide header and
+  footer, asides, forms, scripts and styles (toggle with
+  `--full-page-content`). A `<header>`/`<footer>` inside the content (a
+  product's headline and intro, an offer's footnotes) is kept, and the page's
+  `<h1>` block is never lost when it sits next to the text block.
 - **Structured data**: title, description, language, and deduplicated
   absolute links — available as JSON.
 - **Robust charset handling** for legacy German pages (→ UTF-8).

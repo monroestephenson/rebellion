@@ -37,6 +37,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     char *md2 = rbl_render_markdown(root, "https://example.com/base/", false);
     free(md2);
 
+    char *md3 = rbl_main_content_markdown(root, "https://example.com/base/");
+    free(md3);
+
     rbl_node_free(root);
     return 0;
 }

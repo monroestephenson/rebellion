@@ -8,6 +8,7 @@ add_executable(rebellion_tests
     test_html.c
     test_proxy.c
     test_net.c
+    test_extract.c
     test_jsonval.c
     test_integration.c
 )

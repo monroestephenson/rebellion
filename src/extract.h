@@ -25,4 +25,13 @@ void rbl_collect_links(rbl_node *root, const char *base_url, rbl_strlist *out);
  * tree. The returned node is owned by the tree (do not free). */
 rbl_node *rbl_find_main_content(rbl_node *root);
 
+/* The block holding the page's headline (<h1>) when `content` does not
+ * contain it — e.g. a hero section next to the text block — or NULL. */
+rbl_node *rbl_find_lead(rbl_node *root, rbl_node *content);
+
+/* Markdown for the page's main content: the main block, preceded by the
+ * headline block when the main block lacks it. Page chrome is dropped.
+ * Heap string (caller frees), or NULL on OOM. */
+char *rbl_main_content_markdown(rbl_node *root, const char *base_url);
+
 #endif /* REBELLION_EXTRACT_H */

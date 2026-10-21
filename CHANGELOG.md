@@ -45,6 +45,15 @@ follow [Semantic Versioning](https://semver.org/) from 1.0 onward.
 - Chromium launch waits up to 45 s for DevTools (cold containers).
 
 ### Fixed
+- **Main-content extraction dropped headlines and intros.** Every `<header>`
+  and `<footer>` was treated as site chrome, so a product page's
+  `<header><h1>…</h1><h2>…</h2><p>intro</p></header>` inside `<main>` vanished
+  (while its image and CTA survived), as did footnotes in a content
+  `<footer>`. Header/footer now count as chrome only at page level (the ARIA
+  banner/contentinfo rule), ARIA `banner`/`contentinfo`/`navigation` roles
+  are honored, and when the best text block does not contain the page's
+  `<h1>`, the headline block in front of it is kept too (not when it is
+  mostly links, and never a linked logo).
 - `$REBELLION_CHROMIUM` / `$CHROME_PATH` were ignored unless a path was also
   passed in the config; an explicitly configured path is now authoritative.
 - Browser engine: real HTTP status codes, Chrome error pages are no longer

@@ -76,8 +76,8 @@ static rbl_doc *doc_from_html(const char *html, size_t html_len, const char *bas
     meta.title = meta.description = meta.language = NULL;
     rbl_meta_free(&meta);
 
-    rbl_node *content = o->only_main_content ? rbl_find_main_content(root) : root;
-    d->markdown = rbl_render_markdown(content, base_url, o->only_main_content);
+    d->markdown = o->only_main_content ? rbl_main_content_markdown(root, base_url)
+                                       : rbl_render_markdown(root, base_url, false);
     if (!d->markdown) d->markdown = rbl_strdup("");
 
     if (o->include_raw_html) d->html = rbl_strndup(html, html_len);

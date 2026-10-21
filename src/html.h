@@ -39,4 +39,12 @@ const char *rbl_node_attr(const rbl_node *n, const char *name);
 /* True if the element tag equals `tag` (case-insensitive). */
 bool rbl_node_is(const rbl_node *n, const char *tag);
 
+/* True for page-level chrome: <nav>, role=navigation/banner/contentinfo, and
+ * a <header>/<footer> that belongs to the page rather than to a piece of
+ * content. Inside <main>, <article>, <section>, <aside> or <nav> a header or
+ * footer introduces or annotates that content (a product's headline, an
+ * offer's footnotes) and is not chrome — the rule ARIA uses for the banner
+ * and contentinfo landmarks. */
+bool rbl_node_is_page_chrome(const rbl_node *n);
+
 #endif /* REBELLION_HTML_H */

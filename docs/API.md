@@ -56,7 +56,7 @@ curl -sS http://127.0.0.1:8080/v1/scrape \
 |-------------------|---------|---------|-------|
 | `url`             | string  | —       | required; `http`/`https` only |
 | `engine`          | string  | `auto`  | `auto` (HTTP, escalate to the browser when the page looks JS-gated or empty), `http`, `browser` |
-| `onlyMainContent` | bool    | `true`  | drop nav/header/footer/aside; keep the article body |
+| `onlyMainContent` | bool    | `true`  | keep the article body and its headline; drop site navigation, the site header/footer and asides |
 | `includeHtml`     | bool    | `false` | add the cleaned HTML as `html` |
 | `includeLinks`    | bool    | `true`  | absolute, de-duplicated links |
 | `respectRobots`   | bool    | `true`  | obey robots.txt (`403 robots_denied` otherwise) |

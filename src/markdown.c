@@ -18,6 +18,7 @@ typedef struct {
     bool pending_space;
     const char *base;
     bool drop_boiler;
+    rbl_node *root; /* the subtree being rendered */
     int list_depth;
     struct {
         bool ordered;
@@ -129,12 +130,12 @@ static bool skip_always(const char *t) {
         if (strcmp(t, v[i]) == 0) return true;
     return false;
 }
-static bool skip_boiler(const char *t) {
-    static const char *const v[] = {"nav",    "header", "footer", "aside", "form",
-                                    "button", "iframe", "dialog", "menu",  NULL};
+static bool skip_boiler(const rbl_node *n) {
+    static const char *const v[] = {"aside",  "form", "button", "iframe",
+                                    "dialog", "menu", NULL};
     for (int i = 0; v[i]; i++)
-        if (strcmp(t, v[i]) == 0) return true;
-    return false;
+        if (strcmp(n->tag, v[i]) == 0) return true;
+    return rbl_node_is_page_chrome(n);
 }
 
 static bool node_hidden(rbl_node *n) {
@@ -398,7 +399,8 @@ static void render_node(md_ctx *m, rbl_node *n) {
 
     const char *t = n->tag;
     if (skip_always(t)) return;
-    if (m->drop_boiler && skip_boiler(t)) return;
+    /* The root was chosen as content; only its descendants can be chrome. */
+    if (m->drop_boiler && n != m->root && skip_boiler(n)) return;
     if (node_hidden(n)) return;
 
     if (t[0] == 'h' && t[1] >= '1' && t[1] <= '6' && t[2] == '\0') {
@@ -576,6 +578,7 @@ char *rbl_render_markdown(rbl_node *content_root, const char *base_url,
     m.at_bol = true;
     m.base = base_url;
     m.drop_boiler = drop_boilerplate;
+    m.root = content_root;
 
     render_node(&m, content_root);
 

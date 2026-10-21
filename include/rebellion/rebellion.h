@@ -63,8 +63,9 @@ typedef enum {
 typedef struct rbl_scrape_opts {
     rbl_engine engine;
 
-    /* Content selection. When only_main_content is true (default) we strip
-     * nav/header/footer/aside/script/style and keep the main article body. */
+    /* Content selection. When only_main_content is true (default) we keep
+     * the main article body (plus the page's headline block) and strip site
+     * chrome: nav, the page-level header/footer, aside, script, style. */
     bool only_main_content;
     bool include_raw_html;   /* keep the (cleaned) HTML on the doc          */
     bool include_links;      /* collect absolute links                      */

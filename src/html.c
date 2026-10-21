@@ -100,6 +100,26 @@ bool rbl_node_is(const rbl_node *n, const char *tag) {
     return n && n->type == RBL_NODE_ELEMENT && n->tag && rbl_streq_ci(n->tag, tag);
 }
 
+static bool role_is(const rbl_node *n, const char *role) {
+    const char *r = rbl_node_attr(n, "role");
+    return r && rbl_streq_ci(r, role);
+}
+
+bool rbl_node_is_page_chrome(const rbl_node *n) {
+    if (!n || n->type != RBL_NODE_ELEMENT || !n->tag) return false;
+    if (role_is(n, "navigation") || role_is(n, "banner") || role_is(n, "contentinfo"))
+        return true;
+    if (rbl_node_is(n, "nav")) return true;
+    if (!rbl_node_is(n, "header") && !rbl_node_is(n, "footer")) return false;
+    for (const rbl_node *p = n->parent; p; p = p->parent) {
+        if (rbl_node_is(p, "main") || rbl_node_is(p, "article") ||
+            rbl_node_is(p, "section") || rbl_node_is(p, "aside") ||
+            rbl_node_is(p, "nav") || role_is(p, "main") || role_is(p, "article"))
+            return false;
+    }
+    return true;
+}
+
 /* ---- tokenizer / tree builder --------------------------------------- */
 
 typedef struct {
