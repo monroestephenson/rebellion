@@ -5,6 +5,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <stdatomic.h>
 
 /* ---- buffer --------------------------------------------------------- */
 
@@ -268,13 +269,14 @@ bool rbl_strset_add(rbl_strset *s, const char *key) {
 
 /* ---- logging -------------------------------------------------------- */
 
-static bool g_verbose = false;
+/* Process-wide; atomic because clients may be created on any thread. */
+static atomic_bool g_verbose = false;
 void rbl_log_set_verbose(bool v) {
-    g_verbose = v;
+    atomic_store(&g_verbose, v);
 }
 
 void rbl_logf(const char *fmt, ...) {
-    if (!g_verbose) return;
+    if (!atomic_load(&g_verbose)) return;
     va_list ap;
     va_start(ap, fmt);
     fputs("[rebellion] ", stderr);

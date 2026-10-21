@@ -29,6 +29,25 @@ void test_url(void) {
     CHECK_STREQ(r, "https://cdn.de/z");
     free(r);
 
+    /* hrefs are cleaned like a browser would before resolving */
+    static const char *const cases[][2] = {
+        {"  /kontakt  ", "https://a.de/kontakt"},
+        {"/impres\n  sum", "https://a.de/impres%20%20sum"},
+        {"/a\tb\r\n", "https://a.de/ab"},
+        {"\\\\other.de\\x", "https://other.de/x"},
+        {"x\\y?q=a\\b", "https://a.de/dir/x/y?q=a\\b"},
+        {"/a\"b<c>", "https://a.de/a%22b%3Cc%3E"},
+        {"/Über-uns", "https://a.de/%c3%9cber-uns"},
+        {"?q=müller", "https://a.de/dir/?q=m%c3%bcller"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        r = rbl_url_resolve("https://a.de/dir/", cases[i][0]);
+        CHECK_STREQ(r, cases[i][1]);
+        free(r);
+    }
+    CHECK(rbl_url_resolve("https://a.de/", "javascript:alert(1)") == NULL);
+    CHECK(rbl_url_resolve("https://a.de/", " mailto:x@a.de") == NULL);
+
     r = rbl_url_strip_fragment("https://a.de/x#y");
     CHECK_STREQ(r, "https://a.de/x");
     free(r);

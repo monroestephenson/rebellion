@@ -41,10 +41,12 @@
 
 typedef struct {
     rbl_client *client;
-    const char *api_key; /* NULL => no auth required */
-    size_t max_body;     /* request body cap */
-    int crawl_cap;       /* max pages per crawl request */
-    int max_conns;       /* concurrent connection cap */
+    const char *api_key;     /* NULL => no auth required */
+    const char *cors_origin; /* Access-Control-Allow-Origin value, or NULL */
+    bool loopback_only;      /* bound to a loopback address */
+    size_t max_body;         /* request body cap */
+    int crawl_cap;           /* max pages per crawl request */
+    int max_conns;           /* concurrent connection cap */
     bool verbose;
     bool quiet;
 } srv_cfg;
@@ -97,22 +99,40 @@ static bool ensure_len(int fd, rbl_buf *in, size_t need, long long deadline) {
 
 static const char *status_text(int code) {
     switch (code) {
-    case 200: return "OK";
-    case 204: return "No Content";
-    case 400: return "Bad Request";
-    case 401: return "Unauthorized";
-    case 403: return "Forbidden";
-    case 404: return "Not Found";
-    case 405: return "Method Not Allowed";
-    case 413: return "Payload Too Large";
-    case 415: return "Unsupported Media Type";
-    case 422: return "Unprocessable Content";
-    case 500: return "Internal Server Error";
-    case 501: return "Not Implemented";
-    case 502: return "Bad Gateway";
-    case 503: return "Service Unavailable";
-    case 504: return "Gateway Timeout";
-    default: return "Error";
+    case 200:
+        return "OK";
+    case 204:
+        return "No Content";
+    case 400:
+        return "Bad Request";
+    case 401:
+        return "Unauthorized";
+    case 403:
+        return "Forbidden";
+    case 404:
+        return "Not Found";
+    case 405:
+        return "Method Not Allowed";
+    case 413:
+        return "Payload Too Large";
+    case 421:
+        return "Misdirected Request";
+    case 415:
+        return "Unsupported Media Type";
+    case 422:
+        return "Unprocessable Content";
+    case 500:
+        return "Internal Server Error";
+    case 501:
+        return "Not Implemented";
+    case 502:
+        return "Bad Gateway";
+    case 503:
+        return "Service Unavailable";
+    case 504:
+        return "Gateway Timeout";
+    default:
+        return "Error";
     }
 }
 
@@ -123,15 +143,24 @@ static int send_response(int fd, int code, const char *ctype, const char *body,
     rbl_buf_appendf(&h,
                     "HTTP/1.1 %d %s\r\n"
                     "Content-Type: %s\r\n"
-                    "Content-Length: %zu\r\n"
-                    "Access-Control-Allow-Origin: *\r\n"
-                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                    "Access-Control-Allow-Headers: Content-Type, Authorization, "
-                    "X-API-Key\r\n"
-                    "Cache-Control: no-store\r\n"
-                    "Connection: close\r\n"
-                    "Server: rebellion/" RBL_VERSION_STRING "\r\n\r\n",
+                    "Content-Length: %zu\r\n",
                     code, status_text(code), ctype, blen);
+    /* CORS is opt-in: by default browsers cannot read responses cross-origin. */
+    if (g_cfg.cors_origin) {
+        rbl_buf_appendf(&h,
+                        "Access-Control-Allow-Origin: %s\r\n"
+                        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                        "Access-Control-Allow-Headers: Content-Type, Authorization, "
+                        "X-API-Key\r\n"
+                        "Access-Control-Max-Age: 600\r\n",
+                        g_cfg.cors_origin);
+        if (strcmp(g_cfg.cors_origin, "*") != 0)
+            rbl_buf_append_str(&h, "Vary: Origin\r\n");
+    }
+    rbl_buf_append_str(&h, "Cache-Control: no-store\r\n"
+                           "X-Content-Type-Options: nosniff\r\n"
+                           "Connection: close\r\n"
+                           "Server: rebellion/" RBL_VERSION_STRING "\r\n\r\n");
     send_all(fd, h.data, h.len);
     if (body && blen) send_all(fd, body, blen);
     rbl_buf_free(&h);
@@ -159,21 +188,51 @@ static int send_error(int fd, int code, const char *errcode, const char *msg) {
 /* Map a library status to an HTTP code + machine-readable code string. */
 static int status_http(rbl_status st, const char **code) {
     switch (st) {
-    case RBL_OK: *code = "ok"; return 200;
-    case RBL_ERR_BAD_URL: *code = "bad_url"; return 400;
-    case RBL_ERR_INVALID_ARG: *code = "bad_request"; return 400;
-    case RBL_ERR_BLOCKED: *code = "blocked"; return 403;
-    case RBL_ERR_ROBOTS_DENIED: *code = "robots_denied"; return 403;
-    case RBL_ERR_UNSUPPORTED_CONTENT: *code = "unsupported_content"; return 415;
-    case RBL_ERR_TIMEOUT: *code = "timeout"; return 504;
-    case RBL_ERR_NETWORK: *code = "network"; return 502;
-    case RBL_ERR_TOO_MANY_REDIRECTS: *code = "too_many_redirects"; return 502;
-    case RBL_ERR_TOO_LARGE: *code = "response_too_large"; return 502;
-    case RBL_ERR_RENDER: *code = "render_failed"; return 502;
-    case RBL_ERR_BUSY: *code = "busy"; return 503;
-    case RBL_ERR_UNSUPPORTED: *code = "unsupported"; return 501;
-    case RBL_ERR_OOM: *code = "out_of_memory"; return 500;
-    default: *code = "error"; return 500;
+    case RBL_OK:
+        *code = "ok";
+        return 200;
+    case RBL_ERR_BAD_URL:
+        *code = "bad_url";
+        return 400;
+    case RBL_ERR_INVALID_ARG:
+        *code = "bad_request";
+        return 400;
+    case RBL_ERR_BLOCKED:
+        *code = "blocked";
+        return 403;
+    case RBL_ERR_ROBOTS_DENIED:
+        *code = "robots_denied";
+        return 403;
+    case RBL_ERR_UNSUPPORTED_CONTENT:
+        *code = "unsupported_content";
+        return 415;
+    case RBL_ERR_TIMEOUT:
+        *code = "timeout";
+        return 504;
+    case RBL_ERR_NETWORK:
+        *code = "network";
+        return 502;
+    case RBL_ERR_TOO_MANY_REDIRECTS:
+        *code = "too_many_redirects";
+        return 502;
+    case RBL_ERR_TOO_LARGE:
+        *code = "response_too_large";
+        return 502;
+    case RBL_ERR_RENDER:
+        *code = "render_failed";
+        return 502;
+    case RBL_ERR_BUSY:
+        *code = "busy";
+        return 503;
+    case RBL_ERR_UNSUPPORTED:
+        *code = "unsupported";
+        return 501;
+    case RBL_ERR_OOM:
+        *code = "out_of_memory";
+        return 500;
+    default:
+        *code = "error";
+        return 500;
     }
 }
 
@@ -268,7 +327,8 @@ static const char *validate_actions(const rbl_jv *actions) {
 }
 
 /* Run the actions; on a non-optional failure returns its status and index. */
-static rbl_status run_actions(rbl_session *s, const rbl_jv *actions, size_t *failed_at) {
+static rbl_status run_actions(rbl_session *s, const rbl_jv *actions,
+                              size_t *failed_at) {
     for (size_t i = 0; actions && i < actions->count; i++) {
         const rbl_jv *ac = actions->items[i];
         const char *type = rbl_jv_get_str(ac, "type", "");
@@ -343,8 +403,9 @@ static int handle_scrape(int fd, const rbl_jv *req) {
         }
         if (st == RBL_OK) {
             d = rbl_session_capture(s, &o, o.screenshot, o.full_page);
-            if (!d) st = rbl_session_last_error(s) != RBL_OK ? RBL_ERR_BLOCKED
-                                                           : RBL_ERR_RENDER;
+            if (!d)
+                st = rbl_session_last_error(s) != RBL_OK ? RBL_ERR_BLOCKED
+                                                         : RBL_ERR_RENDER;
         }
         rbl_session_close(s);
     } else {
@@ -401,6 +462,11 @@ static int handle_crawl(int fd, const rbl_jv *req) {
     co.allow_subdomains = rbl_jv_get_bool(req, "allowSubdomains", true);
     co.include_regex = rbl_jv_get_str(req, "include", NULL);
     co.exclude_regex = rbl_jv_get_str(req, "exclude", NULL);
+    if ((co.include_regex && strlen(co.include_regex) > 512) ||
+        (co.exclude_regex && strlen(co.exclude_regex) > 512))
+        return send_error(fd, 400, "bad_request",
+                          "include/exclude patterns are limited "
+                          "to 512 characters");
 
     crawl_sink cs;
     rbl_buf_init(&cs.out);
@@ -445,7 +511,8 @@ static int handle_health(int fd) {
     snprintf(buf, sizeof(buf),
              "{\"status\":\"ok\",\"service\":\"rebellion\",\"version\":\"%s\","
              "\"browser\":%s}\n",
-             RBL_VERSION_STRING, rbl_browser_available(g_cfg.client) ? "true" : "false");
+             RBL_VERSION_STRING,
+             rbl_browser_available(g_cfg.client) ? "true" : "false");
     return send_json(fd, 200, buf);
 }
 
@@ -477,7 +544,8 @@ static char *header_value(const char *headers, const char *name) {
 static bool secret_eq(const char *a, const char *b) {
     size_t la = strlen(a), lb = strlen(b);
     unsigned char diff = (unsigned char)(la != lb);
-    for (size_t i = 0; i < la; i++) diff |= (unsigned char)(a[i] ^ b[i % (lb ? lb : 1)]);
+    for (size_t i = 0; i < la; i++)
+        diff |= (unsigned char)(a[i] ^ b[i % (lb ? lb : 1)]);
     return diff == 0;
 }
 
@@ -497,6 +565,40 @@ static bool auth_ok(const char *headers) {
             ok = secret_eq(k, g_cfg.api_key);
             free(k);
         }
+    }
+    return ok;
+}
+
+/* DNS-rebinding guard. A page on evil.example can point its own hostname at
+ * 127.0.0.1 and then talk to a loopback-bound server as same-origin. So a
+ * loopback server without an API key only answers requests addressed to a
+ * loopback name. (Clients that send no Host header are not browsers.) */
+static bool host_ok(const char *headers) {
+    if (!g_cfg.loopback_only || g_cfg.api_key) return true;
+    char *h = header_value(headers, "Host");
+    if (!h) return true;
+    /* strip the port: "[::1]:8080" -> "[::1]", "localhost:8080" -> "localhost" */
+    char *end = h[0] == '[' ? strchr(h, ']') : NULL;
+    char *colon = strrchr(end ? end : h, ':');
+    if (colon && strspn(colon + 1, "0123456789") == strlen(colon + 1)) *colon = '\0';
+    struct in_addr v4;
+    bool ok = !strcasecmp(h, "localhost") || !strcmp(h, "[::1]") ||
+              (inet_pton(AF_INET, h, &v4) == 1 && (ntohl(v4.s_addr) >> 24) == 127);
+    free(h);
+    return ok;
+}
+
+/* POST bodies must be declared as JSON. Besides being the contract, this
+ * makes browsers preflight cross-site requests, which fail unless CORS was
+ * enabled, so a web page cannot drive the API behind the user's back. */
+static bool content_type_json(const char *headers) {
+    char *ct = header_value(headers, "Content-Type");
+    bool ok = false;
+    if (ct) {
+        size_t n = strcspn(ct, "; \t");
+        ok = n == strlen("application/json") &&
+             strncasecmp(ct, "application/json", n) == 0;
+        free(ct);
     }
     return ok;
 }
@@ -527,7 +629,8 @@ static int read_chunked(int fd, rbl_buf *in, size_t pos, long long deadline,
                 while (!(eol = in->len > pos
                                    ? memmem(in->data + pos, in->len - pos, "\r\n", 2)
                                    : NULL)) {
-                    if (in->len - pos > 8192 || !read_more(fd, in, deadline)) return 400;
+                    if (in->len - pos > 8192 || !read_more(fd, in, deadline))
+                        return 400;
                 }
                 if (eol == in->data + pos) return 0;
                 pos = (size_t)(eol - in->data) + 2;
@@ -554,7 +657,8 @@ static int process_request(int fd, rbl_buf *in, char *method, size_t msz, char *
             break;
         }
         if (in->len > MAX_HEADER_BYTES)
-            return send_error(fd, 413, "headers_too_large", "request headers too large");
+            return send_error(fd, 413, "headers_too_large",
+                              "request headers too large");
         if (!read_more(fd, in, deadline)) return 0; /* client went away */
     }
 
@@ -572,12 +676,18 @@ static int process_request(int fd, rbl_buf *in, char *method, size_t msz, char *
     snprintf(path, psz, "%s", rawpath);
 
     int code;
-    if (strcmp(method, "OPTIONS") == 0) {
-        code = send_response(fd, 204, "text/plain", "", 0);
-        goto out;
-    }
     if (strcmp(method, "GET") == 0 && strcmp(path, "/health") == 0) {
         code = handle_health(fd); /* unauthenticated, for load balancers */
+        goto out;
+    }
+    if (!host_ok(hdr)) {
+        code = send_error(fd, 421, "host_not_allowed",
+                          "this server only answers requests to localhost; "
+                          "set --api-key to serve other host names");
+        goto out;
+    }
+    if (strcmp(method, "OPTIONS") == 0) {
+        code = send_response(fd, 204, "text/plain", "", 0);
         goto out;
     }
     if (!auth_ok(hdr)) {
@@ -595,6 +705,11 @@ static int process_request(int fd, rbl_buf *in, char *method, size_t msz, char *
     if (strcmp(path, "/v1/scrape") && strcmp(path, "/v1/crawl") &&
         strcmp(path, "/v1/map")) {
         code = send_error(fd, 404, "not_found", "unknown endpoint");
+        goto out;
+    }
+    if (!content_type_json(hdr)) {
+        code = send_error(fd, 415, "unsupported_media_type",
+                          "send the request body with Content-Type: application/json");
         goto out;
     }
 
@@ -685,29 +800,32 @@ static void *handle_conn(void *arg) {
 /* ---- main ----------------------------------------------------------- */
 
 static void usage(void) {
-    fputs("rebellion-server " RBL_VERSION_STRING " — HTTP+JSON API for rebellion\n\n"
-          "USAGE: rebellion-server [options]\n\n"
-          "  --host <addr>          Bind address (default 127.0.0.1; IPv4 or IPv6)\n"
-          "  --port <n>             Port (default 8080)\n"
-          "  --api-key <key>        Require Authorization: Bearer <key> (or X-API-Key).\n"
-          "                         Also read from $REBELLION_API_KEY.\n"
-          "  --allow-private        Allow scraping loopback/private/internal hosts\n"
-          "  --proxy <url>          Proxy URL; repeat for a rotating pool\n"
-          "  --proxy-strategy <s>   round-robin (default) | random | sticky\n"
-          "  --profile <dir>        Persistent browser profile directory\n"
-          "  --max-browsers <n>     Concurrent headless browsers (default 4)\n"
-          "  --crawl-cap <n>        Max pages per crawl request (default 100)\n"
-          "  --max-conns <n>        Max concurrent connections (default 32)\n"
-          "  --max-body <bytes>     Max request body size (default 2097152)\n"
-          "  --quiet                No access log\n"
-          "  --verbose, -v          Debug logging to stderr\n"
-          "  --help, -h             Show this help\n\n"
-          "ENDPOINTS:\n"
-          "  GET  /health\n"
-          "  POST /v1/scrape   {\"url\":\"https://example.com\"}\n"
-          "  POST /v1/crawl    {\"url\":\"...\",\"limit\":25,\"depth\":2}\n"
-          "  POST /v1/map      {\"url\":\"...\"}\n",
-          stdout);
+    fputs(
+        "rebellion-server " RBL_VERSION_STRING " — HTTP+JSON API for rebellion\n\n"
+        "USAGE: rebellion-server [options]\n\n"
+        "  --host <addr>          Bind address (default 127.0.0.1; IPv4 or IPv6)\n"
+        "  --port <n>             Port (default $PORT, else 8080)\n"
+        "  --api-key <key>        Require Authorization: Bearer <key> (or X-API-Key).\n"
+        "                         Also read from $REBELLION_API_KEY.\n"
+        "  --allow-private        Allow scraping loopback/private/internal hosts\n"
+        "  --cors-origin <o>      Send Access-Control-Allow-Origin: <o> (e.g. an\n"
+        "                         app origin, or *). Off by default.\n"
+        "  --proxy <url>          Proxy URL; repeat for a rotating pool\n"
+        "  --proxy-strategy <s>   round-robin (default) | random | sticky\n"
+        "  --profile <dir>        Persistent browser profile directory\n"
+        "  --max-browsers <n>     Concurrent headless browsers (default 4)\n"
+        "  --crawl-cap <n>        Max pages per crawl request (default 100)\n"
+        "  --max-conns <n>        Max concurrent connections (default 32)\n"
+        "  --max-body <bytes>     Max request body size (default 2097152)\n"
+        "  --quiet                No access log\n"
+        "  --verbose, -v          Debug logging to stderr\n"
+        "  --help, -h             Show this help\n\n"
+        "ENDPOINTS:\n"
+        "  GET  /health\n"
+        "  POST /v1/scrape   {\"url\":\"https://example.com\"}\n"
+        "  POST /v1/crawl    {\"url\":\"...\",\"limit\":25,\"depth\":2}\n"
+        "  POST /v1/map      {\"url\":\"...\"}\n",
+        stdout);
 }
 
 static bool parse_int(const char *s, long lo, long hi, long *out) {
@@ -724,7 +842,12 @@ int main(int argc, char **argv) {
     long max_body = 2 * 1024 * 1024;
     bool allow_private = false, verbose = false, quiet = false;
     const char *api_key = getenv("REBELLION_API_KEY");
-    const char *profile = NULL, *proxy_strategy = NULL;
+    const char *env_port = getenv("PORT"); /* container platforms set this */
+    if (env_port && *env_port && !parse_int(env_port, 1, 65535, &port)) {
+        fprintf(stderr, "rebellion-server: invalid $PORT '%s'\n", env_port);
+        return 2;
+    }
+    const char *profile = NULL, *proxy_strategy = NULL, *cors_origin = NULL;
     const char *proxies[64];
     int n_proxies = 0;
 
@@ -760,6 +883,13 @@ int main(int argc, char **argv) {
             api_key = v;
         } else if (!strcmp(s, "--allow-private")) {
             allow_private = true;
+        } else if (!strcmp(s, "--cors-origin")) {
+            NEED_VAL();
+            if (has_ctl(v) || !*v) {
+                fprintf(stderr, "rebellion-server: invalid --cors-origin\n");
+                return 2;
+            }
+            cors_origin = v;
         } else if (!strcmp(s, "--proxy")) {
             NEED_VAL();
             if (n_proxies >= 64) {
@@ -824,11 +954,16 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        rbl_client_set_proxies(client, proxies, (size_t)n_proxies, strat);
+        if (rbl_client_set_proxies(client, proxies, (size_t)n_proxies, strat) !=
+            RBL_OK) {
+            fprintf(stderr, "rebellion-server: invalid --proxy\n");
+            return 2;
+        }
     }
 
     g_cfg.client = client;
     g_cfg.api_key = api_key;
+    g_cfg.cors_origin = cors_origin;
     g_cfg.max_body = (size_t)max_body;
     g_cfg.crawl_cap = (int)crawl_cap;
     g_cfg.max_conns = (int)max_conns;
@@ -855,7 +990,17 @@ int main(int argc, char **argv) {
         if (lfd < 0) continue;
         int one = 1;
         setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        if (bind(lfd, a->ai_addr, a->ai_addrlen) == 0 && listen(lfd, 128) == 0) break;
+        if (bind(lfd, a->ai_addr, a->ai_addrlen) == 0 && listen(lfd, 128) == 0) {
+            if (a->ai_family == AF_INET) {
+                const struct sockaddr_in *in4 = (const struct sockaddr_in *)a->ai_addr;
+                g_cfg.loopback_only = (ntohl(in4->sin_addr.s_addr) >> 24) == 127;
+            } else if (a->ai_family == AF_INET6) {
+                const struct sockaddr_in6 *in6 =
+                    (const struct sockaddr_in6 *)a->ai_addr;
+                g_cfg.loopback_only = IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr);
+            }
+            break;
+        }
         close(lfd);
         lfd = -1;
     }
@@ -871,8 +1016,7 @@ int main(int argc, char **argv) {
             "max browsers: %ld)\n",
             RBL_VERSION_STRING, host, port, api_key ? "required" : "none",
             rbl_browser_available(client) ? "available" : "unavailable", max_browsers);
-    if (!api_key && strcmp(host, "127.0.0.1") && strcmp(host, "::1") &&
-        strcmp(host, "localhost"))
+    if (!api_key && !g_cfg.loopback_only)
         fprintf(stderr, "rebellion-server: WARNING: listening on a non-loopback "
                         "address without --api-key\n");
 

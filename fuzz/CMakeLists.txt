@@ -9,7 +9,7 @@
 # The library picks up coverage/sanitizer instrumentation from CMAKE_C_FLAGS;
 # the target below just adds the libFuzzer driver.
 
-foreach(target fuzz_html fuzz_json)
+foreach(target fuzz_html fuzz_json fuzz_robots)
     add_executable(${target} ${target}.c)
     target_link_libraries(${target} PRIVATE rebellion)
     target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/src)

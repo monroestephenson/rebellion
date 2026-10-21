@@ -17,9 +17,9 @@ typedef enum {
 typedef struct rbl_jv rbl_jv;
 struct rbl_jv {
     rbl_jv_type type;
-    bool b;      /* RBL_JV_BOOL */
-    double num;  /* RBL_JV_NUM  */
-    char *str;   /* RBL_JV_STR (owned) */
+    bool b;     /* RBL_JV_BOOL */
+    double num; /* RBL_JV_NUM  */
+    char *str;  /* RBL_JV_STR (owned) */
     /* RBL_JV_ARR / RBL_JV_OBJ */
     rbl_jv **items;
     char **keys; /* OBJ only, parallel to items */

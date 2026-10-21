@@ -78,12 +78,28 @@ bool rbl_host_is_private(const char *host) {
         host = tmp;
     }
 
-    /* localhost and *.localhost are always local. */
+    /* A trailing dot names the same host: "localhost.", "127.0.0.1.". */
+    char nodot[256];
     size_t hl = strlen(host);
+    while (hl > 0 && host[hl - 1] == '.') hl--;
+    if (hl == 0) return true;
+    if (host[hl] != '\0') {
+        if (hl >= sizeof(nodot)) return true;
+        memcpy(nodot, host, hl);
+        nodot[hl] = '\0';
+        host = nodot;
+    }
+
+    /* localhost and *.localhost are always local. */
     if (rbl_streq_ci(host, "localhost")) return true;
     if (hl > 10 && rbl_streq_ci(host + hl - 10, ".localhost")) return true;
 
-    return rbl_ip_is_private(host);
+    if (rbl_ip_is_private(host)) return true;
+    /* Legacy IPv4 spellings resolvers still accept (127.1, 0x7f.1,
+     * 2130706433) when a proxy, not libcurl, ends up parsing the host. */
+    struct in_addr v4;
+    if (inet_aton(host, &v4)) return ipv4_is_private(ntohl(v4.s_addr));
+    return false;
 }
 
 bool rbl_url_host_is_private(const char *url) {

@@ -66,15 +66,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake libcurl4-openssl-dev clang
-      - name: Build + smoke-run fuzzer
+            build-essential cmake libcurl4-openssl-dev clang libclang-rt-18-dev
+      - name: Build + smoke-run fuzzers
         run: |
           cmake -S . -B build-fuzz -DREBELLION_FUZZ=ON \
             -DREBELLION_BUILD_TESTS=OFF -DREBELLION_BUILD_CLI=OFF \
+            -DREBELLION_BUILD_SERVER=OFF \
             -DREBELLION_HARDEN=OFF -DCMAKE_C_COMPILER=clang \
             -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -g -O1"
           cmake --build build-fuzz -j
-          ./build-fuzz/fuzz/fuzz_html -max_total_time=30 -print_final_stats=1
+          for t in fuzz_html fuzz_json fuzz_robots; do
+            ./build-fuzz/fuzz/$t -max_total_time=30 -print_final_stats=1
+          done
 
   sanitizers:
     runs-on: ubuntu-latest

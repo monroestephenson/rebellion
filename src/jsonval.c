@@ -190,12 +190,24 @@ static rbl_jv *parse_value(jp *s) {
     if (s->p < s->end) {
         char c = *s->p;
         switch (c) {
-        case '"': v = parse_string(s); break;
-        case '[': v = parse_array(s); break;
-        case '{': v = parse_object(s); break;
-        case 't': v = parse_literal(s, "true", RBL_JV_BOOL, true); break;
-        case 'f': v = parse_literal(s, "false", RBL_JV_BOOL, false); break;
-        case 'n': v = parse_literal(s, "null", RBL_JV_NULL, false); break;
+        case '"':
+            v = parse_string(s);
+            break;
+        case '[':
+            v = parse_array(s);
+            break;
+        case '{':
+            v = parse_object(s);
+            break;
+        case 't':
+            v = parse_literal(s, "true", RBL_JV_BOOL, true);
+            break;
+        case 'f':
+            v = parse_literal(s, "false", RBL_JV_BOOL, false);
+            break;
+        case 'n':
+            v = parse_literal(s, "null", RBL_JV_NULL, false);
+            break;
         default:
             if (c == '-' || (c >= '0' && c <= '9')) v = parse_number(s);
             break;

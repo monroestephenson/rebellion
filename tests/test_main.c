@@ -11,6 +11,7 @@ int main(void) {
     test_markdown();
     test_robots();
     test_proxy();
+    test_net();
     test_jsonval();
     test_integration();
 

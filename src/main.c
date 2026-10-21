@@ -33,6 +33,7 @@ static const char *USAGE =
     "  --ua <string>          Override the User-Agent\n"
     "  --lang <string>        Accept-Language (default: de-DE,de;q=0.9,...)\n"
     "  --screenshot <file>    Save a PNG screenshot (implies --browser)\n"
+    "  --full-page            Screenshot the whole page, not just the viewport\n"
     "  --proxy <url>          Proxy URL; repeat to build a rotating pool\n"
     "  --proxy-strategy <s>   round-robin (default) | random | sticky\n"
     "  --profile <dir>        Persistent browser profile (keeps logins/cookies)\n"
@@ -47,6 +48,8 @@ static const char *USAGE =
     "  --submit <selector>    Submit a form (or its field/button)\n"
     "  --scroll-bottom        Scroll to the bottom (trigger lazy loading)\n"
     "  --wait <ms>            Pause for N milliseconds\n"
+    "  A failing action is reported and skipped (e.g. a cookie banner that is\n"
+    "  not shown); a navigation blocked by the private-network guard is fatal.\n"
     "\n"
     "CRAWL OPTIONS:\n"
     "  --limit <n>            Max pages to fetch (default: 50)\n"
@@ -78,8 +81,7 @@ typedef enum {
 
 typedef struct {
     act_kind kind;
-    const char *a; /* selector */
-    char *b;       /* value (for --fill); owned */
+    const char *a; /* selector, or "selector=value" for --fill */
     long n;        /* ms (for --wait) */
 } action;
 
@@ -99,6 +101,7 @@ typedef struct {
     const char *ua;
     const char *lang;
     const char *screenshot;
+    bool full_page;
     bool verbose;
     /* crawl */
     int limit;
@@ -174,8 +177,33 @@ static void apply_scrape_opts(const args *a, rbl_scrape_opts *o) {
     if (a->lang) o->accept_language = a->lang;
     if (a->screenshot) {
         o->screenshot = true;
+        o->full_page = a->full_page;
         o->engine = RBL_ENGINE_BROWSER;
     }
+}
+
+/* Strict integer parsing for option values. */
+static bool parse_long(const char *s, long lo, long hi, long *out) {
+    char *e = NULL;
+    errno = 0;
+    long v = strtol(s, &e, 10);
+    if (!*s || *e || errno || v < lo || v > hi) return false;
+    *out = v;
+    return true;
+}
+
+/* Write s as a JSON string literal. */
+static void json_puts(FILE *f, const char *s) {
+    fputc('"', f);
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p == '"' || *p == '\\')
+            fprintf(f, "\\%c", *p);
+        else if (*p < 0x20)
+            fprintf(f, "\\u%04x", *p);
+        else
+            fputc(*p, f);
+    }
+    fputc('"', f);
 }
 
 /* ---- scrape --------------------------------------------------------- */
@@ -199,6 +227,10 @@ static int write_doc_output(const args *a, rbl_doc *d) {
     int rc;
     if (a->json) {
         char *js = rbl_doc_to_json(d, true);
+        if (!js) {
+            fprintf(stderr, "rebellion: out of memory\n");
+            return 1;
+        }
         rc = write_output(a->output, js, strlen(js));
         free(js);
     } else {
@@ -219,6 +251,7 @@ static int scrape_with_actions(rbl_client *c, const args *a) {
     if (a->ua) so.user_agent = a->ua;
     if (a->lang) so.accept_language = a->lang;
     if (a->timeout_ms > 0) so.timeout_ms = a->timeout_ms;
+    so.respect_robots = !a->no_robots;
 
     rbl_status st;
     rbl_session *s = rbl_session_open(c, &so, &st);
@@ -272,16 +305,21 @@ static int scrape_with_actions(rbl_client *c, const args *a) {
             as = rbl_session_wait_ms(s, ac->n);
             break;
         }
+        if (as == RBL_OK) as = rbl_session_last_error(s); /* blocked navigation */
         if (a->verbose || as != RBL_OK) {
             const char *detail = ac->a ? ac->a : (argbuf[0] ? argbuf : "");
             fprintf(stderr, "rebellion: action %s%s%s -> %s\n", name,
                     detail[0] ? " " : "", detail, rbl_strerror(as));
         }
+        if (as == RBL_ERR_BLOCKED) {
+            rbl_session_close(s);
+            return 1;
+        }
     }
 
     if (a->screenshot) {
         size_t n = 0;
-        unsigned char *png = rbl_session_screenshot(s, a->full_page_content, &n);
+        unsigned char *png = rbl_session_screenshot(s, a->full_page, &n);
         save_png(a->screenshot, png, n);
         free(png);
     }
@@ -365,7 +403,7 @@ static bool crawl_cb(const rbl_doc *doc, void *user) {
         if (f) {
             if (a->json) {
                 char *js = rbl_doc_to_json(doc, true);
-                fputs(js, f);
+                if (js) fputs(js, f);
                 free(js);
             } else {
                 const char *md = rbl_doc_markdown(doc);
@@ -378,7 +416,7 @@ static bool crawl_cb(const rbl_doc *doc, void *user) {
     } else {
         if (a->json) {
             char *js = rbl_doc_to_json(doc, false);
-            printf("%s\n", js);
+            if (js) printf("%s\n", js);
             free(js);
         } else {
             printf("\n\n<!-- ===== %s ===== -->\n\n", url);
@@ -428,13 +466,17 @@ static int cmd_map(rbl_client *c, const args *a) {
     }
     FILE *f = a->output ? fopen(a->output, "wb") : stdout;
     if (!f) {
+        fprintf(stderr, "rebellion: cannot open %s\n", a->output);
         rbl_strlist_free(&list);
         return 1;
     }
     if (a->json) {
         fputs("[\n", f);
-        for (size_t i = 0; i < list.count; i++)
-            fprintf(f, "  \"%s\"%s\n", list.items[i], i + 1 < list.count ? "," : "");
+        for (size_t i = 0; i < list.count; i++) {
+            fputs("  ", f);
+            json_puts(f, list.items[i]);
+            fputs(i + 1 < list.count ? ",\n" : "\n", f);
+        }
         fputs("]\n", f);
     } else {
         for (size_t i = 0; i < list.count; i++) fprintf(f, "%s\n", list.items[i]);
@@ -503,13 +545,14 @@ int main(int argc, char **argv) {
             a.full_page_content = true;
         else if (!strcmp(s, "--timeout")) {
             const char *v;
-            if (!need_val(argc, argv, &i, &v))
-                return arg_err("--timeout needs a value");
-            a.timeout_ms = atol(v);
+            if (!need_val(argc, argv, &i, &v) ||
+                !parse_long(v, 1, 3600000, &a.timeout_ms))
+                return arg_err("--timeout needs a number of milliseconds");
         } else if (!strcmp(s, "--delay")) {
             const char *v;
-            if (!need_val(argc, argv, &i, &v)) return arg_err("--delay needs a value");
-            a.delay_ms = atol(v);
+            if (!need_val(argc, argv, &i, &v) ||
+                !parse_long(v, 0, 3600000, &a.delay_ms))
+                return arg_err("--delay needs a number of milliseconds");
         } else if (!strcmp(s, "--ua")) {
             if (!need_val(argc, argv, &i, &a.ua)) return arg_err("--ua needs a value");
         } else if (!strcmp(s, "--lang")) {
@@ -518,16 +561,22 @@ int main(int argc, char **argv) {
         } else if (!strcmp(s, "--screenshot")) {
             if (!need_val(argc, argv, &i, &a.screenshot))
                 return arg_err("--screenshot needs a value");
-        } else if (!strcmp(s, "--verbose") || !strcmp(s, "-v"))
+        } else if (!strcmp(s, "--full-page"))
+            a.full_page = true;
+        else if (!strcmp(s, "--verbose") || !strcmp(s, "-v"))
             a.verbose = true;
         else if (!strcmp(s, "--limit")) {
             const char *v;
-            if (!need_val(argc, argv, &i, &v)) return arg_err("--limit needs a value");
-            a.limit = atoi(v);
+            long n;
+            if (!need_val(argc, argv, &i, &v) || !parse_long(v, 1, 1000000, &n))
+                return arg_err("--limit needs a positive number");
+            a.limit = (int)n;
         } else if (!strcmp(s, "--depth")) {
             const char *v;
-            if (!need_val(argc, argv, &i, &v)) return arg_err("--depth needs a value");
-            a.depth = atoi(v);
+            long n;
+            if (!need_val(argc, argv, &i, &v) || !parse_long(v, 0, 100, &n))
+                return arg_err("--depth needs a number from 0 to 100");
+            a.depth = (int)n;
         } else if (!strcmp(s, "--any-host"))
             a.any_host = true;
         else if (!strcmp(s, "--include")) {
@@ -555,32 +604,34 @@ int main(int argc, char **argv) {
             if (!need_val(argc, argv, &i, &v))
                 return arg_err("--wait-for needs a value");
             if (a.n_actions >= RBL_MAX_ACTIONS) return arg_err("too many actions");
-            a.actions[a.n_actions++] = (action){ACT_WAIT_FOR, v, NULL, 0};
+            a.actions[a.n_actions++] = (action){ACT_WAIT_FOR, v, 0};
         } else if (!strcmp(s, "--click")) {
             const char *v;
             if (!need_val(argc, argv, &i, &v)) return arg_err("--click needs a value");
             if (a.n_actions >= RBL_MAX_ACTIONS) return arg_err("too many actions");
-            a.actions[a.n_actions++] = (action){ACT_CLICK, v, NULL, 0};
+            a.actions[a.n_actions++] = (action){ACT_CLICK, v, 0};
         } else if (!strcmp(s, "--submit")) {
             const char *v;
             if (!need_val(argc, argv, &i, &v)) return arg_err("--submit needs a value");
             if (a.n_actions >= RBL_MAX_ACTIONS) return arg_err("too many actions");
-            a.actions[a.n_actions++] = (action){ACT_SUBMIT, v, NULL, 0};
+            a.actions[a.n_actions++] = (action){ACT_SUBMIT, v, 0};
         } else if (!strcmp(s, "--fill")) {
             const char *v;
             if (!need_val(argc, argv, &i, &v)) return arg_err("--fill needs a value");
             if (!strchr(v, '=')) return arg_err("--fill expects selector=value");
             if (a.n_actions >= RBL_MAX_ACTIONS) return arg_err("too many actions");
             /* a holds the full "selector=value"; split at execution. */
-            a.actions[a.n_actions++] = (action){ACT_FILL, v, NULL, 0};
+            a.actions[a.n_actions++] = (action){ACT_FILL, v, 0};
         } else if (!strcmp(s, "--scroll-bottom")) {
             if (a.n_actions >= RBL_MAX_ACTIONS) return arg_err("too many actions");
-            a.actions[a.n_actions++] = (action){ACT_SCROLL_BOTTOM, NULL, NULL, 0};
+            a.actions[a.n_actions++] = (action){ACT_SCROLL_BOTTOM, NULL, 0};
         } else if (!strcmp(s, "--wait")) {
             const char *v;
-            if (!need_val(argc, argv, &i, &v)) return arg_err("--wait needs a value");
+            long ms;
+            if (!need_val(argc, argv, &i, &v) || !parse_long(v, 0, 600000, &ms))
+                return arg_err("--wait needs a number of milliseconds");
             if (a.n_actions >= RBL_MAX_ACTIONS) return arg_err("too many actions");
-            a.actions[a.n_actions++] = (action){ACT_WAIT, NULL, NULL, atol(v)};
+            a.actions[a.n_actions++] = (action){ACT_WAIT, NULL, ms};
         } else if (s[0] == '-') {
             fprintf(stderr, "rebellion: unknown option '%s'\n", s);
             return arg_err("unknown option");
@@ -598,6 +649,16 @@ int main(int argc, char **argv) {
     if (strcmp(a.cmd, "scrape") && strcmp(a.cmd, "crawl") && strcmp(a.cmd, "map"))
         return arg_err("command must be scrape, crawl, or map");
 
+    rbl_proxy_strategy strat = RBL_PROXY_ROUND_ROBIN;
+    if (a.proxy_strategy) {
+        if (!strcasecmp(a.proxy_strategy, "random"))
+            strat = RBL_PROXY_RANDOM;
+        else if (!strcasecmp(a.proxy_strategy, "sticky"))
+            strat = RBL_PROXY_STICKY_HOST;
+        else if (strcasecmp(a.proxy_strategy, "round-robin"))
+            return arg_err("--proxy-strategy must be round-robin, random or sticky");
+    }
+
     rbl_client_config cfg;
     rbl_client_config_init(&cfg);
     if (a.ua) cfg.user_agent = a.ua;
@@ -614,20 +675,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (a.n_proxies > 0) {
-        rbl_proxy_strategy strat = RBL_PROXY_ROUND_ROBIN;
-        if (a.proxy_strategy) {
-            if (!strcasecmp(a.proxy_strategy, "random"))
-                strat = RBL_PROXY_RANDOM;
-            else if (!strcasecmp(a.proxy_strategy, "sticky"))
-                strat = RBL_PROXY_STICKY_HOST;
-            else if (strcasecmp(a.proxy_strategy, "round-robin"))
-                fprintf(stderr,
-                        "rebellion: unknown --proxy-strategy '%s', "
-                        "using round-robin\n",
-                        a.proxy_strategy);
-        }
-        rbl_client_set_proxies(c, a.proxies, (size_t)a.n_proxies, strat);
+    if (a.n_proxies > 0 &&
+        rbl_client_set_proxies(c, a.proxies, (size_t)a.n_proxies, strat) != RBL_OK) {
+        fprintf(stderr, "rebellion: invalid --proxy\n");
+        rbl_client_free(c);
+        return 2;
     }
 
     int rc;

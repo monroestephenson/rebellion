@@ -20,3 +20,8 @@ compile_commands.json
 
 # Chromium profile scratch
 .rebellion-profile/
+
+# Kotlin example build output
+/examples/kotlin/build/
+/examples/kotlin/.gradle/
+/examples/kotlin/.kotlin/

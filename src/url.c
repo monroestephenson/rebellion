@@ -52,10 +52,40 @@ bool rbl_url_parse(const char *in, rbl_url *out) {
     return true;
 }
 
-char *rbl_url_resolve(const char *base, const char *ref) {
+/* Clean an href the way browsers do before resolving it (WHATWG URL): trim
+ * surrounding whitespace/controls, drop tabs and newlines (hrefs wrapped
+ * across lines), treat '\\' as '/' before any query/fragment, and
+ * percent-encode the few characters curl would otherwise pass through raw. */
+static char *clean_ref(const char *ref) {
+    const char *s = ref, *e = ref + strlen(ref);
+    while (s < e && (unsigned char)*s <= 0x20) s++;
+    while (e > s && (unsigned char)e[-1] <= 0x20) e--;
+    rbl_buf b;
+    rbl_buf_init(&b);
+    bool in_path = true; /* before '?' or '#' */
+    for (const char *p = s; p < e; p++) {
+        char ch = *p;
+        if (ch == '\t' || ch == '\n' || ch == '\r') continue;
+        if (ch == '?' || ch == '#') in_path = false;
+        if (ch == '\\' && in_path)
+            rbl_buf_append_ch(&b, '/');
+        else if (ch == '"' || ch == '<' || ch == '>' || (ch == '`' && in_path))
+            rbl_buf_appendf(&b, "%%%02X", (unsigned)(unsigned char)ch);
+        else
+            rbl_buf_append_ch(&b, ch);
+    }
+    return rbl_buf_steal(&b);
+}
+
+char *rbl_url_resolve(const char *base, const char *ref_in) {
+    if (!ref_in) return NULL;
+    char *ref = clean_ref(ref_in);
     if (!ref) return NULL;
     CURLU *h = curl_url();
-    if (!h) return NULL;
+    if (!h) {
+        free(ref);
+        return NULL;
+    }
 
     char *result = NULL;
     /* Seed with the base, then apply the (possibly relative) reference. */
@@ -79,6 +109,7 @@ char *rbl_url_resolve(const char *base, const char *ref) {
     }
 done:
     curl_url_cleanup(h);
+    free(ref);
     return result;
 }
 

@@ -545,7 +545,8 @@ static char *cdp_eval_string(ws_conn *w, const char *expr, long timeout_ms) {
     if (!msg) return NULL;
     /* {"id":N,"result":{"result":{"type":"string","value":"..."}}} */
     char *out = NULL;
-    if (!strstr(msg, "\"exceptionDetails\"")) out = json_str(msg, "\"result\"", "value");
+    if (!strstr(msg, "\"exceptionDetails\""))
+        out = json_str(msg, "\"result\"", "value");
     free(msg);
     return out;
 }
@@ -608,8 +609,8 @@ static bool split_proxy(const char *in, char **chrome_proxy, char **user, char *
     if (!h) return false;
     bool ok = false;
     char *scheme = NULL, *host = NULL, *port = NULL, *u = NULL, *pw = NULL;
-    if (curl_url_set(h, CURLUPART_URL, in, CURLU_NON_SUPPORT_SCHEME | CURLU_GUESS_SCHEME) !=
-        CURLUE_OK)
+    if (curl_url_set(h, CURLUPART_URL, in,
+                     CURLU_NON_SUPPORT_SCHEME | CURLU_GUESS_SCHEME) != CURLUE_OK)
         goto done;
     curl_url_get(h, CURLUPART_SCHEME, &scheme, 0);
     curl_url_get(h, CURLUPART_HOST, &host, 0);
@@ -653,7 +654,8 @@ done:
 /* ---- process launch ------------------------------------------------- */
 
 typedef struct {
-    pid_t pid;
+    pid_t pid;    /* the supervisor; also the browser's process group */
+    int lifeline; /* write end of the supervisor's lifeline pipe, or -1 */
     char profile_dir[512];
     bool owns_profile; /* true => created a throwaway dir, delete on close */
 } browser_proc;
@@ -666,6 +668,76 @@ typedef struct {
 } launch_opts;
 
 static void rm_rf(const char *path); /* fwd */
+
+/* Close every descriptor >= lo (in a forked child: async-signal-safe only). */
+static void close_fds_from(int lo, long maxfd) {
+#ifdef SYS_close_range
+    if (syscall(SYS_close_range, (unsigned)lo, ~0U, 0U) == 0) return;
+#endif
+    for (long fd = lo; fd < maxfd; fd++) close((int)fd);
+}
+
+/* The library's process is gone: stop Chromium (SIGTERM first, so a
+ * persistent profile can flush), delete a throwaway profile, then kill
+ * whatever is left in the process group, ourselves included. */
+static void reap_orphaned(pid_t chrome, const char *rm_dir) {
+    kill(0, SIGTERM); /* we ignore it */
+    bool reaped = false;
+    for (int i = 0; i < 60 && !reaped; i++) {
+        if (waitpid(chrome, NULL, WNOHANG) == chrome)
+            reaped = true;
+        else
+            poll(NULL, 0, 50);
+    }
+    if (!reaped) {
+        kill(chrome, SIGKILL);
+        waitpid(chrome, NULL, 0);
+    }
+    if (rm_dir) {
+        pid_t rm = fork();
+        if (rm == 0) {
+            const char *rmv[] = {"rm", "-rf", "--", rm_dir, NULL};
+            execv("/bin/rm", (char *const *)rmv);
+            _exit(127);
+        }
+        if (rm > 0) waitpid(rm, NULL, 0);
+    }
+    kill(0, SIGKILL);
+    _exit(1);
+}
+
+/* Runs in the forked child. Becomes a tiny supervisor: it starts Chromium as
+ * its own child (same process group) and watches the lifeline pipe on fd 3,
+ * which reports EOF once the library's process is gone for any reason (crash,
+ * SIGKILL, exit with sessions open) -- Chromium would otherwise outlive us
+ * forever. Exits when Chromium exits. Only async-signal-safe calls: the
+ * parent may be multi-threaded. */
+static void supervise_chromium(const char *path, const char *const *argv,
+                               const char *rm_dir) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGTERM, &sa, NULL); /* SIGTERM to the group stops Chromium, not us */
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, NULL);
+
+    pid_t chrome = fork();
+    if (chrome < 0) _exit(127);
+    if (chrome == 0) {
+        sa.sa_handler = SIG_DFL;
+        sigaction(SIGTERM, &sa, NULL);
+        close(3); /* the lifeline is ours, not the browser's */
+        execv(path, (char *const *)argv);
+        _exit(127);
+    }
+    for (;;) {
+        pid_t r = waitpid(chrome, NULL, WNOHANG);
+        if (r == chrome || (r < 0 && errno != EINTR)) _exit(0);
+        struct pollfd p = {3, POLLIN, 0};
+        if (poll(&p, 1, 100) > 0) reap_orphaned(chrome, rm_dir); /* EOF */
+    }
+}
 
 static bool launch_chromium(rbl_client *c, const launch_opts *o, browser_proc *bp) {
     if (o->profile_dir && *o->profile_dir) {
@@ -742,31 +814,40 @@ static bool launch_chromium(rbl_client *c, const launch_opts *o, browser_proc *b
     long maxfd = sysconf(_SC_OPEN_MAX);
     if (maxfd < 0 || maxfd > 65536) maxfd = 65536;
 
+    int lifeline[2];
+    if (pipe2(lifeline, O_CLOEXEC) != 0) {
+        if (bp->owns_profile) rm_rf(bp->profile_dir);
+        return false;
+    }
     pid_t pid = fork();
     if (pid < 0) {
+        close(lifeline[0]);
+        close(lifeline[1]);
         if (bp->owns_profile) rm_rf(bp->profile_dir);
         return false;
     }
     if (pid == 0) {
-        /* Child: own process group, silence output, and drop every inherited
-         * descriptor (sockets of other requests, the server's listener...). */
+        /* Child: own process group, silence output, keep only the lifeline
+         * (as fd 3) and drop every other inherited descriptor (sockets of
+         * other requests, the server's listener...). */
         setsid();
+        int lf = fcntl(lifeline[0], F_DUPFD, 3); /* clear of stdio */
+        if (lf < 0) _exit(127);
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             dup2(devnull, STDIN_FILENO);
             dup2(devnull, STDOUT_FILENO);
             dup2(devnull, STDERR_FILENO);
         }
-        bool closed = false;
-#ifdef SYS_close_range
-        closed = syscall(SYS_close_range, 3U, ~0U, 0U) == 0;
-#endif
-        if (!closed)
-            for (long fd = 3; fd < maxfd; fd++) close((int)fd);
-        execv(c->chromium_path, (char *const *)argv);
+        if (lf != 3 && dup2(lf, 3) != 3) _exit(127);
+        close_fds_from(4, maxfd);
+        supervise_chromium(c->chromium_path, argv,
+                           bp->owns_profile ? bp->profile_dir : NULL);
         _exit(127);
     }
+    close(lifeline[0]);
     bp->pid = pid;
+    bp->lifeline = lifeline[1];
     return true;
 }
 
@@ -840,6 +921,10 @@ static void kill_browser(browser_proc *bp, bool graceful) {
             waitpid(bp->pid, NULL, 0);
         }
         bp->pid = 0;
+    }
+    if (bp->lifeline >= 0) {
+        close(bp->lifeline);
+        bp->lifeline = -1;
     }
     /* Only delete throwaway profiles; persistent ones are kept for reuse. */
     if (bp->owns_profile && bp->profile_dir[0]) rm_rf(bp->profile_dir);
@@ -949,7 +1034,8 @@ static rbl_status session_connect(rbl_session *s, bool intercept_all) {
         const char *params =
             intercept_all
                 ? "{\"handleAuthRequests\":true,\"patterns\":[{\"urlPattern\":\"*\"}]}"
-                : "{\"patterns\":[{\"urlPattern\":\"*\",\"resourceType\":\"Document\"}]}";
+                : "{\"patterns\":[{\"urlPattern\":\"*\",\"resourceType\":\"Document\"}]"
+                  "}";
         if (!cdp_call_ok(&s->ws, "Fetch.enable", params, 5000)) return RBL_ERR_RENDER;
         s->ws.ic.enabled = true;
     }
@@ -986,6 +1072,7 @@ rbl_session *rbl_session_open(rbl_client *c, const rbl_session_opts *in,
     s->client = c;
     s->ws.fd = -1;
     s->bp.pid = -1;
+    s->bp.lifeline = -1;
     s->timeout_ms = o.timeout_ms > 0 ? o.timeout_ms : 45000;
     s->respect_robots = o.respect_robots;
 
@@ -1110,8 +1197,8 @@ rbl_status rbl_session_goto(rbl_session *s, const char *url, long settle_ms) {
     for (;;) {
         long remain = (long)(nav_deadline - rbl_now_ms());
         if (remain <= 0) break;
-        char *rs =
-            cdp_eval_string(&s->ws, "document.readyState", remain < 3000 ? remain : 3000);
+        char *rs = cdp_eval_string(&s->ws, "document.readyState",
+                                   remain < 3000 ? remain : 3000);
         bool complete = rs && strcmp(rs, "complete") == 0;
         free(rs);
         if (complete) break;
@@ -1172,10 +1259,10 @@ rbl_status rbl_session_submit(rbl_session *s, const char *selector) {
     if (!s || !s->open || !selector) return RBL_ERR_INVALID_ARG;
     rbl_buf js;
     js_query(&js, selector);
-    rbl_buf_append_str(&js,
-                       "if(e.tagName==='FORM'){e.requestSubmit?e.requestSubmit():e.submit();}"
-                       "else if(e.form){e.form.requestSubmit?e.form.requestSubmit(e):"
-                       "e.form.submit();}else{e.click();}return 'OK';})()");
+    rbl_buf_append_str(
+        &js, "if(e.tagName==='FORM'){e.requestSubmit?e.requestSubmit():e.submit();}"
+             "else if(e.form){e.form.requestSubmit?e.form.requestSubmit(e):"
+             "e.form.submit();}else{e.click();}return 'OK';})()");
     return run_action(s, &js);
 }
 

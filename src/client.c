@@ -33,11 +33,16 @@ void rbl_client_config_init(rbl_client_config *cfg) {
 /* Locate a usable Chromium/Chrome binary. Honors $REBELLION_CHROMIUM and the
  * Playwright layout used in the cloud image, then common system paths. */
 static char *detect_chromium(const char *explicit_path) {
-    const char *candidates_env[] = {explicit_path, getenv("REBELLION_CHROMIUM"),
-                                    getenv("CHROME_PATH"), NULL};
-    for (int i = 0; candidates_env[i]; i++) {
-        if (candidates_env[i][0] && access(candidates_env[i], X_OK) == 0)
-            return rbl_strdup(candidates_env[i]);
+    /* An explicitly configured binary (config, then environment) is
+     * authoritative: if it is unusable the browser engine is unavailable,
+     * rather than silently running some other browser. */
+    const char *configured[] = {explicit_path, getenv("REBELLION_CHROMIUM"),
+                                getenv("CHROME_PATH")};
+    for (size_t i = 0; i < sizeof(configured) / sizeof(configured[0]); i++) {
+        if (!configured[i] || !configured[i][0]) continue;
+        if (access(configured[i], X_OK) == 0) return rbl_strdup(configured[i]);
+        rbl_logf("browser: %s is not an executable Chromium", configured[i]);
+        return NULL;
     }
     const char *paths[] = {
         "/opt/pw-browsers/chromium",
@@ -115,8 +120,9 @@ rbl_client *rbl_client_new(const rbl_client_config *cfg_in) {
     c->cfg.chromium_path = c->chromium_path;
     c->cfg.cookie_file = c->cookie_file;
     c->cfg.browser_profile_dir = c->profile_dir;
-    c->proxied = env_set("HTTPS_PROXY") || env_set("https_proxy") ||
-                 env_set("ALL_PROXY") || env_set("all_proxy");
+    /* libcurl reads these (http_proxy only in lowercase). */
+    c->proxied = env_set("http_proxy") || env_set("HTTPS_PROXY") ||
+                 env_set("https_proxy") || env_set("ALL_PROXY") || env_set("all_proxy");
 
     for (int i = 0; i < CURL_LOCK_DATA_LAST; i++)
         pthread_mutex_init(&c->share_mtx[i], NULL);
@@ -135,8 +141,7 @@ rbl_client *rbl_client_new(const rbl_client_config *cfg_in) {
         curl_share_setopt(c->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
     }
 
-    if (!c->ua || !c->accept_language ||
-        (cfg_in->cookie_file && !c->cookie_file) ||
+    if (!c->ua || !c->accept_language || (cfg_in->cookie_file && !c->cookie_file) ||
         (cfg_in->browser_profile_dir && !c->profile_dir)) {
         rbl_client_free(c);
         return NULL;
@@ -208,15 +213,38 @@ void rbl_client_browser_release(rbl_client *c, bool persistent_profile) {
     pthread_mutex_unlock(&c->browser_lock);
 }
 
+/* A proxy entry must be a URL with a host ("host:port" alone is accepted as
+ * http) and nothing that could smuggle extra arguments or headers. */
+static bool proxy_valid(const char *p) {
+    if (!p || !*p) return false;
+    for (const char *q = p; *q; q++)
+        if ((unsigned char)*q <= 0x20 || *q == 0x7F) return false;
+    CURLU *h = curl_url();
+    if (!h) return false;
+    char *host = NULL;
+    bool ok =
+        curl_url_set(h, CURLUPART_URL, p,
+                     CURLU_NON_SUPPORT_SCHEME | CURLU_GUESS_SCHEME) == CURLUE_OK &&
+        curl_url_get(h, CURLUPART_HOST, &host, 0) == CURLUE_OK && host && *host;
+    curl_free(host);
+    curl_url_cleanup(h);
+    return ok;
+}
+
 rbl_status rbl_client_set_proxies(rbl_client *c, const char *const *proxies, size_t n,
                                   rbl_proxy_strategy strategy) {
-    if (!c) return RBL_ERR_INVALID_ARG;
+    if (!c || (n > 0 && !proxies)) return RBL_ERR_INVALID_ARG;
+    if (strategy != RBL_PROXY_ROUND_ROBIN && strategy != RBL_PROXY_RANDOM &&
+        strategy != RBL_PROXY_STICKY_HOST)
+        return RBL_ERR_INVALID_ARG;
+    for (size_t i = 0; i < n; i++)
+        if (!proxy_valid(proxies[i])) return RBL_ERR_INVALID_ARG;
     char **copy = NULL;
     if (n > 0) {
         copy = (char **)calloc(n, sizeof(char *));
         if (!copy) return RBL_ERR_OOM;
         for (size_t i = 0; i < n; i++) {
-            copy[i] = rbl_strdup(proxies[i] ? proxies[i] : "");
+            copy[i] = rbl_strdup(proxies[i]);
             if (!copy[i]) {
                 for (size_t j = 0; j < i; j++) free(copy[j]);
                 free(copy);

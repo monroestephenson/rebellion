@@ -89,14 +89,17 @@ set(REBELLION_HARDEN_C "")
 set(REBELLION_HARDEN_LD "")
 if(REBELLION_HARDEN)
     include(CheckCCompilerFlag)
-    foreach(flag -fstack-protector-strong -fstack-clash-protection
-                 -D_FORTIFY_SOURCE=2 -fPIC)
+    foreach(flag -fstack-protector-strong -fstack-clash-protection -fPIC)
         string(MAKE_C_IDENTIFIER "HAVE${flag}" _ok)
         check_c_compiler_flag("${flag}" ${_ok})
         if(${_ok})
             list(APPEND REBELLION_HARDEN_C "${flag}")
         endif()
     endforeach()
+    # glibc's fortify checks need optimization (and warn without it, which
+    # breaks -Werror Debug builds), so skip them for Debug.
+    list(APPEND REBELLION_HARDEN_C
+        "$<$<NOT:$<CONFIG:Debug>>:-U_FORTIFY_SOURCE;-D_FORTIFY_SOURCE=2>")
     if(NOT APPLE)
         list(APPEND REBELLION_HARDEN_LD "-Wl,-z,relro,-z,now")
     endif()
@@ -144,6 +147,10 @@ install(TARGETS rebellion
 if(REBELLION_BUILD_CLI)
     install(TARGETS rebellion-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(FILES docs/rebellion.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 OPTIONAL)
+endif()
+if(REBELLION_BUILD_SERVER)
+    install(TARGETS rebellion-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES docs/rebellion-server.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 OPTIONAL)
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 

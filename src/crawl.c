@@ -219,12 +219,24 @@ static void harvest_sitemap(const char *xml, rbl_strlist *out, rbl_strset *seen,
     }
 }
 
+/* GET with the same per-host spacing scrapes get (map can fetch hundreds of
+ * sitemaps from one host). */
+static rbl_status polite_get(rbl_client *c, const char *url, long timeout_ms,
+                             rbl_http_result *r) {
+    rbl_url u;
+    if (rbl_url_parse(url, &u)) {
+        rbl_client_rate_limit(c, u.host, 0);
+        rbl_url_free(&u);
+    }
+    return rbl_http_get(c, url, NULL, NULL, timeout_ms, r);
+}
+
 /* Fetch one sitemap URL and harvest it; a sitemap index is expanded one
  * level deep. */
 static void harvest_sitemap_url(rbl_client *c, const char *url, rbl_strlist *out,
                                 rbl_strset *seen, int max_urls) {
     rbl_http_result r;
-    if (rbl_http_get(c, url, NULL, NULL, 15000, &r) == RBL_OK && r.http_code >= 200 &&
+    if (polite_get(c, url, 15000, &r) == RBL_OK && r.http_code >= 200 &&
         r.http_code < 300 && r.is_text && r.body) {
         if (strstr(r.body, "<sitemapindex")) {
             rbl_strlist children;
@@ -234,9 +246,8 @@ static void harvest_sitemap_url(rbl_client *c, const char *url, rbl_strlist *out
             harvest_sitemap(r.body, &children, &cseen, 200);
             for (size_t i = 0; i < children.count && (int)out->count < max_urls; i++) {
                 rbl_http_result cr;
-                if (rbl_http_get(c, children.items[i], NULL, NULL, 15000, &cr) ==
-                        RBL_OK &&
-                    cr.is_text && cr.body)
+                if (polite_get(c, children.items[i], 15000, &cr) == RBL_OK &&
+                    cr.http_code >= 200 && cr.http_code < 300 && cr.is_text && cr.body)
                     harvest_sitemap(cr.body, out, seen, max_urls);
                 rbl_http_result_free(&cr);
             }
@@ -301,7 +312,7 @@ rbl_status rbl_map(rbl_client *c, const char *seed_url, int max_urls,
             home_st = RBL_ERR_ROBOTS_DENIED;
         } else {
             rbl_http_result hr;
-            home_st = rbl_http_get(c, seed.full, NULL, NULL, 20000, &hr);
+            home_st = polite_get(c, seed.full, 20000, &hr);
             if (home_st == RBL_OK && hr.is_html && hr.body) {
                 rbl_url landed;
                 bool have_landed = rbl_url_parse(hr.final_url, &landed);

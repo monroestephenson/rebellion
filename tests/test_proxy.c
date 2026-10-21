@@ -35,6 +35,30 @@ void test_proxy(void) {
     free(h1);
     free(h1b);
 
+    /* malformed entries are rejected and leave the pool unchanged. */
+    const char *bad1[] = {"http://ok:1", ""};
+    const char *bad2[] = {"http://evil:1\r\nX-Injected: 1"};
+    const char *bad3[] = {"http://has space:1"};
+    const char *bad4[] = {NULL};
+    CHECK(rbl_client_set_proxies(c, bad1, 2, RBL_PROXY_ROUND_ROBIN) ==
+          RBL_ERR_INVALID_ARG);
+    CHECK(rbl_client_set_proxies(c, bad2, 1, RBL_PROXY_ROUND_ROBIN) ==
+          RBL_ERR_INVALID_ARG);
+    CHECK(rbl_client_set_proxies(c, bad3, 1, RBL_PROXY_ROUND_ROBIN) ==
+          RBL_ERR_INVALID_ARG);
+    CHECK(rbl_client_set_proxies(c, bad4, 1, RBL_PROXY_ROUND_ROBIN) ==
+          RBL_ERR_INVALID_ARG);
+    CHECK(rbl_client_set_proxies(c, NULL, 2, RBL_PROXY_ROUND_ROBIN) ==
+          RBL_ERR_INVALID_ARG);
+    CHECK(rbl_client_set_proxies(c, pool, 3, (rbl_proxy_strategy)99) ==
+          RBL_ERR_INVALID_ARG);
+    const char *forms[] = {"proxy.example:3128", "socks5h://user:pw@10.0.0.1:1080",
+                           "http://[2001:db8::1]:8080"};
+    CHECK(rbl_client_set_proxies(c, forms, 3, RBL_PROXY_ROUND_ROBIN) == RBL_OK);
+    char *f0 = rbl_client_pick_proxy(c, "example.de");
+    CHECK_STREQ(f0, "proxy.example:3128");
+    free(f0);
+
     /* clearing the pool yields NULL. */
     CHECK(rbl_client_set_proxies(c, NULL, 0, RBL_PROXY_ROUND_ROBIN) == RBL_OK);
     char *none = rbl_client_pick_proxy(c, NULL);

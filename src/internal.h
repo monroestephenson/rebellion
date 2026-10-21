@@ -23,7 +23,7 @@ struct rbl_client {
     char *chromium_path;   /* resolved, or NULL           */
     char *cookie_file;     /* owned copy, or NULL          */
     char *profile_dir;     /* owned copy, or NULL          */
-    bool proxied;          /* an HTTPS/ALL proxy is configured in env */
+    bool proxied;          /* a proxy is configured in the environment */
 
     CURLSH *share; /* shares cookies + DNS across easy handles */
     /* One mutex per curl_lock_data class, indexed by the enum value. */

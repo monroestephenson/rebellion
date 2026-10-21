@@ -71,8 +71,8 @@ static void sniff(const char *data, size_t len, bool *is_text, bool *is_html) {
     if (len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB &&
         (unsigned char)data[2] == 0xBF)
         i = 3;
-    while (i < n && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' ||
-                     data[i] == '\n'))
+    while (i < n &&
+           (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n'))
         i++;
     if (i < n && data[i] == '<') {
         const char *rest = data + i;
@@ -125,6 +125,18 @@ static int prereq_cb(void *clientp, char *conn_primary_ip, char *conn_local_ip,
 }
 #endif
 
+/* Resolve the URL's host and report whether it points at private space. Used
+ * when the peer-IP hook cannot be: with an environment proxy we cannot tell
+ * which connections bypass it (NO_PROXY, scheme-specific variables), and old
+ * libcurl has no hook at all. */
+static bool url_resolves_private(const char *url) {
+    rbl_url u;
+    if (!rbl_url_parse(url, &u)) return false;
+    bool priv = rbl_host_resolves_private(u.host);
+    rbl_url_free(&u);
+    return priv;
+}
+
 static bool status_transient(rbl_status s, long code) {
     if (s == RBL_ERR_NETWORK || s == RBL_ERR_TIMEOUT) return true;
     if (code == 429 || code == 503 || code == 502 || code == 504) return true;
@@ -133,13 +145,19 @@ static bool status_transient(rbl_status s, long code) {
 
 static rbl_status map_curl_error(CURLcode rc, const fetch_ctx *ctx) {
     switch (rc) {
-    case CURLE_OPERATION_TIMEDOUT: return RBL_ERR_TIMEOUT;
-    case CURLE_TOO_MANY_REDIRECTS: return RBL_ERR_TOO_MANY_REDIRECTS;
+    case CURLE_OPERATION_TIMEDOUT:
+        return RBL_ERR_TIMEOUT;
+    case CURLE_TOO_MANY_REDIRECTS:
+        return RBL_ERR_TOO_MANY_REDIRECTS;
     case CURLE_URL_MALFORMAT:
-    case CURLE_UNSUPPORTED_PROTOCOL: return RBL_ERR_BAD_URL;
-    case CURLE_ABORTED_BY_CALLBACK: return RBL_ERR_BLOCKED;
-    case CURLE_WRITE_ERROR: return ctx->too_large ? RBL_ERR_TOO_LARGE : RBL_ERR_NETWORK;
-    default: return RBL_ERR_NETWORK;
+    case CURLE_UNSUPPORTED_PROTOCOL:
+        return RBL_ERR_BAD_URL;
+    case CURLE_ABORTED_BY_CALLBACK:
+        return RBL_ERR_BLOCKED;
+    case CURLE_WRITE_ERROR:
+        return ctx->too_large ? RBL_ERR_TOO_LARGE : RBL_ERR_NETWORK;
+    default:
+        return RBL_ERR_NETWORK;
     }
 }
 
@@ -196,19 +214,23 @@ static rbl_status do_fetch(rbl_client *c, const char *url, const char *ua,
                      (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
 #endif
 
-    bool via_proxy = c->proxied || (proxy && *proxy);
+    /* SSRF: an explicit pool proxy resolves names itself, so only literal
+     * hosts are checked. Direct connections get the peer-IP hook; with an
+     * environment proxy (or no hook) the target is resolved per hop. */
+    bool guard = !c->cfg.allow_private_networks;
+    bool explicit_proxy = proxy && *proxy;
+    bool dns_check = guard && !explicit_proxy && (c->proxied || !RBL_CURL_HAS_PREREQ);
 #if RBL_CURL_HAS_PREREQ
-    /* Peer-IP SSRF check: only meaningful for direct connections. */
-    if (!via_proxy && !c->cfg.allow_private_networks) {
+    if (guard && !explicit_proxy && !c->proxied) {
         curl_easy_setopt(h, CURLOPT_PREREQFUNCTION, prereq_cb);
         curl_easy_setopt(h, CURLOPT_PREREQDATA, c);
     }
 #endif
-    (void)via_proxy;
     if (c->share) curl_easy_setopt(h, CURLOPT_SHARE, c->share);
     /* An explicit pool proxy overrides the environment proxy. */
     if (proxy && *proxy) curl_easy_setopt(h, CURLOPT_PROXY, proxy);
-    curl_easy_setopt(h, CURLOPT_COOKIEFILE, c->cfg.cookie_file ? c->cfg.cookie_file : "");
+    curl_easy_setopt(h, CURLOPT_COOKIEFILE,
+                     c->cfg.cookie_file ? c->cfg.cookie_file : "");
     if (c->cfg.cookie_file) curl_easy_setopt(h, CURLOPT_COOKIEJAR, c->cfg.cookie_file);
 
     rbl_status st = RBL_OK;
@@ -221,6 +243,11 @@ static rbl_status do_fetch(rbl_client *c, const char *url, const char *ua,
         ctx.content_type = NULL;
         ctx.too_large = false;
 
+        if (dns_check && url_resolves_private(cur)) {
+            rbl_logf("SSRF guard: %s resolves to a private address", cur);
+            st = RBL_ERR_BLOCKED;
+            break;
+        }
         curl_easy_setopt(h, CURLOPT_URL, cur);
         CURLcode rc = curl_easy_perform(h);
         if (rc != CURLE_OK) {

@@ -18,8 +18,9 @@ static char *origin_of(const rbl_url *u) {
     rbl_buf_init(&b);
     rbl_buf_appendf(&b, "%s://%s", u->scheme, u->host);
     if (u->port && *u->port) {
-        bool is_default = (rbl_streq_ci(u->scheme, "http") && strcmp(u->port, "80") == 0) ||
-                          (rbl_streq_ci(u->scheme, "https") && strcmp(u->port, "443") == 0);
+        bool is_default =
+            (rbl_streq_ci(u->scheme, "http") && strcmp(u->port, "80") == 0) ||
+            (rbl_streq_ci(u->scheme, "https") && strcmp(u->port, "443") == 0);
         if (!is_default) rbl_buf_appendf(&b, ":%s", u->port);
     }
     return rbl_buf_steal(&b);
@@ -42,7 +43,8 @@ static char *get_robots(rbl_client *c, const rbl_url *u) {
     }
 
     pthread_mutex_lock(&c->host_lock);
-    bool fresh = h->robots_fetched && rbl_now_ms() - h->robots_fetched_ms < RBL_ROBOTS_TTL_MS;
+    bool fresh =
+        h->robots_fetched && rbl_now_ms() - h->robots_fetched_ms < RBL_ROBOTS_TTL_MS;
     char *copy = (fresh && h->robots_body) ? rbl_strdup(h->robots_body) : NULL;
     pthread_mutex_unlock(&c->host_lock);
     if (fresh) {
@@ -188,18 +190,14 @@ static void eval_robots(const char *content, const char *path, const char *ua_to
         it2.p = content;
         const char *kk, *vv;
         size_t kkl, vvl;
-        bool agents = false;
         while (next_line(&it2, &kk, &kkl, &vv, &vvl)) {
             if (key_is(kk, kkl, "user-agent")) {
                 char *ua = rbl_strndup(vv, vvl);
                 rbl_str_tolower_inplace(ua);
-                if (ua_token && *ua_token && strstr(ua, ua_token)) specific_seen = true;
+                if (ua && ua_token && *ua_token && strstr(ua, ua_token))
+                    specific_seen = true;
                 free(ua);
-                agents = true;
-            } else {
-                agents = false;
             }
-            (void)agents;
         }
     }
 
@@ -212,6 +210,7 @@ static void eval_robots(const char *content, const char *path, const char *ua_to
                 reading_agents = true;
             }
             char *ua = rbl_strndup(v, vl);
+            if (!ua) continue;
             rbl_str_tolower_inplace(ua);
             if (strcmp(ua, "*") == 0) {
                 if (!specific_seen) in_group = true; /* use * only if no specific */
@@ -245,7 +244,7 @@ static void eval_robots(const char *content, const char *path, const char *ua_to
             }
         } else if (key_is(k, kl, "crawl-delay")) {
             char *s = rbl_strndup(v, vl);
-            double d = atof(s);
+            double d = s ? atof(s) : 0.0;
             /* Clamp before converting: robots.txt is untrusted and a huge
              * value would overflow the conversion to long. */
             if (d > 3600.0) d = 3600.0;

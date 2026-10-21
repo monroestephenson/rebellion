@@ -104,6 +104,15 @@ expect_code 502 "unreachable target" -X POST "${AUTH[@]}" "${JSON[@]}" -d '{"url
 expect_code 404 "unknown endpoint" -X POST "${AUTH[@]}" "${JSON[@]}" -d '{}' "$API/v1/nope"
 expect_code 405 "wrong method" -X PUT "${AUTH[@]}" "${JSON[@]}" -d '{}' "$API/v1/scrape"
 
+# The body must be declared as JSON (so browsers have to preflight cross-site
+# requests), and CORS is off unless --cors-origin is given.
+expect_code 415 "form-encoded body refused" -X POST "${AUTH[@]}" -d "{\"url\":\"$SITE/\"}" "$API/v1/scrape"
+body_has '"code":"unsupported_media_type"' "415 code"
+expect_code 415 "text/plain body refused" -X POST "${AUTH[@]}" -H 'Content-Type: text/plain' -d "{\"url\":\"$SITE/\"}" "$API/v1/scrape"
+expect_code 200 "JSON with charset parameter" -X POST "${AUTH[@]}" -H 'Content-Type: application/json; charset=utf-8' -d "{\"url\":\"$SITE/index.html\",\"engine\":\"http\"}" "$API/v1/scrape"
+if curl -sS --noproxy '*' -D - -o /dev/null "$API/health" | grep -qi '^Access-Control-Allow-Origin'; then
+    fail "CORS headers sent without --cors-origin"; else ok; fi
+
 # Hostile numbers must be clamped, not crash the server.
 expect_code 200 "huge numbers are clamped" -X POST "${AUTH[@]}" "${JSON[@]}" -d "{\"url\":\"$SITE/index.html\",\"limit\":1e300,\"depth\":-1e300,\"timeoutMs\":1e300}" "$API/v1/map"
 
@@ -114,7 +123,7 @@ start=$(date +%s%N)
 expect_code 200 "Expect: 100-continue" -X POST "${AUTH[@]}" "${JSON[@]}" -H 'Expect: 100-continue' -d "$BIG" "$API/v1/scrape"
 elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
 if [ "$elapsed" -lt 900 ]; then ok; else fail "100-continue was not answered promptly (${elapsed}ms)"; fi
-RAW=$(printf 'POST /v1/scrape HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer s3cret\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n')
+RAW=$(printf 'POST /v1/scrape HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer s3cret\r\nContent-Type: application/json\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n')
 got=$(printf '%s' "$RAW" | python3 -c "
 import socket,sys
 s=socket.create_connection(('127.0.0.1',$PORT));s.sendall(sys.stdin.buffer.read());print(s.recv(64).split(b' ')[1].decode())")
@@ -157,7 +166,7 @@ fi
 
 # ---- a second server without --allow-private: SSRF guard -----------------------
 PORT2=$(free_port)
-"$SERVER_BIN" --port "$PORT2" --quiet >"$WORK/server2.log" 2>&1 &
+"$SERVER_BIN" --port "$PORT2" --cors-origin https://app.example --quiet >"$WORK/server2.log" 2>&1 &
 SRV2_PID=$!
 PIDS+=($SRV2_PID)
 wait_http "http://127.0.0.1:$PORT2/health" || { echo "second server did not start" >&2; exit 1; }
@@ -167,13 +176,33 @@ expect_code 403 "SSRF: metadata IP blocked" -X POST "${JSON[@]}" -d '{"url":"htt
 expect_code 403 "SSRF: map blocked" -X POST "${JSON[@]}" -d "{\"url\":\"$SITE/\"}" "http://127.0.0.1:$PORT2/v1/map"
 expect_code 403 "SSRF: crawl blocked" -X POST "${JSON[@]}" -d "{\"url\":\"$SITE/\"}" "http://127.0.0.1:$PORT2/v1/crawl"
 
+# DNS rebinding: a loopback server without an API key only answers requests
+# addressed to a loopback name.
+expect_code 421 "foreign Host refused" -X POST "${JSON[@]}" -H "Host: evil.example:$PORT2" -d '{"url":"https://example.com/"}' "http://127.0.0.1:$PORT2/v1/scrape"
+body_has '"code":"host_not_allowed"' "421 code"
+expect_code 403 "localhost Host accepted" -X POST "${JSON[@]}" -H "Host: localhost:$PORT2" -d "{\"url\":\"$SITE/\"}" "http://127.0.0.1:$PORT2/v1/scrape"
+
+# CORS when enabled
+if curl -sS --noproxy '*' -D - -o /dev/null "http://127.0.0.1:$PORT2/health" | grep -qi '^Access-Control-Allow-Origin: https://app.example'; then
+    ok; else fail "--cors-origin not applied"; fi
+expect_code 204 "CORS preflight" -X OPTIONS -H 'Origin: https://app.example' -H 'Access-Control-Request-Method: POST' "http://127.0.0.1:$PORT2/v1/scrape"
+
 # ---- graceful shutdown -------------------------------------------------------
-kill -TERM "$SRV_PID"
-for _ in $(seq 1 100); do kill -0 "$SRV_PID" 2>/dev/null || break; sleep 0.1; done
-if kill -0 "$SRV_PID" 2>/dev/null; then fail "server did not exit on SIGTERM"; else
-    wait "$SRV_PID"; rc=$?
-    if [ "$rc" -eq 0 ]; then ok; else fail "server exit code $rc on SIGTERM"; fi
-fi
+for pid in "$SRV_PID" "$SRV2_PID"; do
+    kill -TERM "$pid"
+    for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$pid" 2>/dev/null; then fail "server did not exit on SIGTERM"; else
+        wait "$pid"; rc=$?
+        if [ "$rc" -eq 0 ]; then ok; else fail "server exit code $rc on SIGTERM"; fi
+    fi
+done
+
+# Sanitizer builds report to the server's stderr; any report is a failure.
+for log in "$WORK/server.log" "$WORK/server2.log"; do
+    if grep -qE "Sanitizer|runtime error:" "$log"; then
+        fail "sanitizer report in $(basename "$log")"; cat "$log" >&2
+    else ok; fi
+done
 
 echo "server smoke: $CHECKS checks, $FAILS failed"
 [ "$FAILS" -eq 0 ]

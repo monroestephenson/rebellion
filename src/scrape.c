@@ -281,8 +281,8 @@ rbl_doc *rbl_session_scrape(rbl_session *s, const rbl_scrape_opts *opts) {
     else
         rbl_scrape_opts_init(&o);
     int code = rbl_session_status_code(s);
-    rbl_doc *d = doc_from_html(html, strlen(html), url ? url : "", code > 0 ? code : 200,
-                               "browser", &o);
+    rbl_doc *d = doc_from_html(html, strlen(html), url ? url : "",
+                               code > 0 ? code : 200, "browser", &o);
     free(html);
     return d;
 }

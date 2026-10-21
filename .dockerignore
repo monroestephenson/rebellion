@@ -1,0 +1,12 @@
+# Keep the build context small and free of local build trees.
+.git
+build
+build-*
+_prefix
+cmake-build-*
+examples/kotlin/build
+examples/kotlin/.gradle
+examples/kotlin/.kotlin
+*.o
+*.a
+*.so
