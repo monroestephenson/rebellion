@@ -29,10 +29,15 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
-      - name: Show browser
+      - name: Show and warm up the browser
+        # A fresh runner's first Chrome launch builds font caches and can take
+        # longer than a test's launch budget; do it once up front, and time it.
         run: |
           ls -l /usr/bin/chromium* /usr/bin/google-chrome* 2>/dev/null || true
           google-chrome --version 2>/dev/null || true
+          time fc-cache >/dev/null 2>&1 || true
+          time timeout 180 google-chrome --headless=new --no-sandbox --disable-gpu \
+            --dump-dom about:blank >/dev/null 2>&1 || true
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -102,6 +107,12 @@ jobs:
 
       - name: Build
         run: cmake --build build-asan -j
+
+      - name: Warm up the browser
+        run: |
+          time fc-cache >/dev/null 2>&1 || true
+          time timeout 180 google-chrome --headless=new --no-sandbox --disable-gpu \
+            --dump-dom about:blank >/dev/null 2>&1 || true
 
       - name: Test
         env:
