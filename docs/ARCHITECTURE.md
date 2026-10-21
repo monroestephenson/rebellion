@@ -6,12 +6,18 @@ A scrape flows through these stages:
 URL
  │  rbl_url_parse / resolve (src/url.c, libcurl URL API)
  ▼
-robots.txt gate  (src/robots.c — fetched + cached per host, Crawl-delay honored)
+SSRF guard  (src/net.c — private/loopback/link-local/CGNAT refused)
+ │
+ ▼
+robots.txt gate  (src/robots.c — cached per origin for 1 h, path+query rules,
+ │                Crawl-delay honored, capped at 30 s)
  │
  ▼
 per-host rate limit  (src/client.c)
  │
  ├── HTTP engine (src/http.c, libcurl)
+ │      ├─ redirects followed manually; every hop re-checked by the guard
+ │      ├─ size cap, binary bodies rejected
  │      └─ charset detection + iconv → UTF-8 (src/charset.c)
  │
  └── Browser engine (src/browser.c)
@@ -64,7 +70,29 @@ chosen port from `DevToolsActivePort`, finds a page target via the
 localhost TCP socket (handshake + masked client frames + frame reassembly),
 because the system libcurl is built without WebSocket support. Commands used:
 `Page.enable`, `Runtime.enable`, `Page.navigate`, `Runtime.evaluate`
-(readyState, outerHTML, location.href) and `Page.captureScreenshot`.
+(readyState, outerHTML, location.href, the navigation's `responseStatus`),
+`Page.captureScreenshot` and the `Fetch` domain.
+
+`Fetch.enable` pauses every request the page makes; the client checks its host
+against the SSRF guard and continues or fails it (`Fetch.requestPaused`), and
+answers proxy authentication challenges with the configured credentials
+(`Fetch.authRequired`) — Chromium ignores credentials in `--proxy-server`.
+
+**Process lifecycle.** The forked child starts a new process group and
+becomes a tiny supervisor: it starts Chromium as its own child and watches a "lifeline"
+pipe whose write end only the library's process holds. If that process dies
+for any reason, the pipe reports EOF and the supervisor stops Chromium,
+deletes a throwaway profile and exits, so browsers are never orphaned. Live
+browsers per client are bounded by `max_concurrent_browsers` (a condition
+variable gate); sessions on a persistent profile are serialized.
+
+## The API server
+
+`src/server.c` is a thread-per-connection HTTP/1.1 server (one request per
+connection) over a single shared `rbl_client`. It parses requests with a
+bounded reader (header/body caps, a read deadline, chunked bodies,
+`Expect: 100-continue`), decodes the JSON body with `src/jsonval.c`, and maps
+library statuses to HTTP codes and stable `code` strings. See `docs/API.md`.
 
 ## Charset strategy
 
