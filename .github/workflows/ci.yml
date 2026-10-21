@@ -29,15 +29,22 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
-      - name: Show and warm up the browser
-        # A fresh runner's first Chrome launch builds font caches and can take
-        # longer than a test's launch budget; do it once up front, and time it.
+      - name: Show and warm up the browsers
+        # A fresh runner's first headless launch is far slower than later ones;
+        # do it once up front for each installed browser (rebellion picks
+        # /usr/bin/chromium first) and time it.
         run: |
           ls -l /usr/bin/chromium* /usr/bin/google-chrome* 2>/dev/null || true
-          google-chrome --version 2>/dev/null || true
-          time fc-cache >/dev/null 2>&1 || true
-          time timeout 180 google-chrome --headless=new --no-sandbox --disable-gpu \
-            --dump-dom about:blank >/dev/null 2>&1 || true
+          for b in /usr/bin/chromium /usr/bin/google-chrome; do
+            [ -x "$b" ] || continue
+            "$b" --version 2>/dev/null || true
+            echo "first launch of $b:"
+            time timeout 180 "$b" --headless=new --no-sandbox --disable-gpu \
+              --dump-dom about:blank >/dev/null 2>&1 || true
+            echo "second launch of $b:"
+            time timeout 180 "$b" --headless=new --no-sandbox --disable-gpu \
+              --dump-dom about:blank >/dev/null 2>&1 || true
+          done
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
@@ -108,11 +115,13 @@ jobs:
       - name: Build
         run: cmake --build build-asan -j
 
-      - name: Warm up the browser
+      - name: Warm up the browsers
         run: |
-          time fc-cache >/dev/null 2>&1 || true
-          time timeout 180 google-chrome --headless=new --no-sandbox --disable-gpu \
-            --dump-dom about:blank >/dev/null 2>&1 || true
+          for b in /usr/bin/chromium /usr/bin/google-chrome; do
+            [ -x "$b" ] || continue
+            time timeout 180 "$b" --headless=new --no-sandbox --disable-gpu \
+              --dump-dom about:blank >/dev/null 2>&1 || true
+          done
 
       - name: Test
         env:
