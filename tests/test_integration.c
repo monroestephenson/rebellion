@@ -2,6 +2,7 @@
  * public scrape/crawl/map API against it — no network required. */
 #include "test.h"
 #include "rebellion/rebellion.h"
+#include "util.h" /* rbl_log_set_verbose */
 
 #include <pthread.h>
 #include <stdio.h>
@@ -383,6 +384,12 @@ static rbl_session *open_session(rbl_client *c, const rbl_session_opts *o,
                     rbl_strerror(st));
             g_tests_run++;
             g_tests_failed++;
+            /* Still a failure; repeat it with logging to show which step broke. */
+            rbl_log_set_verbose(true);
+            rbl_session *again = rbl_session_open(c, o, &st);
+            fprintf(stderr, "  (diagnostic retry: %s)\n", rbl_strerror(st));
+            rbl_session_close(again);
+            rbl_log_set_verbose(false);
         }
     }
     return s;

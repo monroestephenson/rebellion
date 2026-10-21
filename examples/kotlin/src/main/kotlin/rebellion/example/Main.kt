@@ -46,9 +46,10 @@ fun main(args: Array<String>) {
         println("actions: ${shot.engine}, screenshot ${shot.screenshot?.length ?: 0} chars of data URL")
     }
 
-    // 5) Errors carry a machine-readable code.
+    // 5) Errors carry a machine-readable code ("bad_url", "blocked",
+    //    "robots_denied", "timeout", "busy", ...).
     try {
-        client.scrape(ScrapeRequest("http://169.254.169.254/latest/meta-data/"))
+        client.scrape(ScrapeRequest("file:///etc/passwd"))
     } catch (e: RebellionException) {
         println("error handling: HTTP ${e.httpStatus}, code=${e.code}")
     }

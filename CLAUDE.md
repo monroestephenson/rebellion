@@ -4,8 +4,9 @@ Guidance for working in this repository.
 
 ## What this is
 
-`rebellion` is a Firecrawl-style web scraper in C: a CLI (`rebellion`) and a
-static library (`librebellion.a`) that turn web pages into clean Markdown plus
+`rebellion` is a Firecrawl-style web scraper in C: a CLI (`rebellion`), an
+HTTP+JSON API server (`rebellion-server`, see `docs/API.md`) and a static
+library (`librebellion.a`) that turn web pages into clean Markdown plus
 structured metadata/links. Two engines: a libcurl HTTP fetch and a headless
 Chromium renderer driven over the DevTools Protocol.
 
@@ -14,7 +15,7 @@ Chromium renderer driven over the DevTools Protocol.
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure      # unit tests
+ctest --test-dir build --output-on-failure      # unit + e2e + API smoke tests
 
 ./build/rebellion scrape <url>                   # try it
 ./build/rebellion scrape <url> --browser         # headless Chromium path
@@ -52,8 +53,13 @@ wait/eval/screenshot) live in `src/browser.c`; the one-shot `rbl_browser_render`
 is built on top of them. Proxy-pool selection is in `src/client.c`
 (`rbl_client_pick_proxy`), wired into `src/http.c` (CURLOPT_PROXY) and the
 browser launch (`--proxy-server`). Persistent profiles come from
-`browser_profile_dir` (not deleted on close). Out of scope by policy:
-CAPTCHA/anti-bot solving.
+`browser_profile_dir` (not deleted on close). Each Chromium runs under a
+small supervisor (`supervise_chromium` in `src/browser.c`) that kills it if
+our process dies; code in that forked child must stay async-signal-safe.
+The SSRF guard lives in `src/net.c` and is applied in `src/http.c` (every
+redirect hop), `src/scrape.c`/`src/crawl.c` and the browser's Fetch
+interception. The API server is `src/server.c`; its contract is tested by
+`tests/server_smoke.sh`. Out of scope by policy: CAPTCHA/anti-bot solving.
 
 ## Notes
 

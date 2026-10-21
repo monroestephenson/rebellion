@@ -974,6 +974,8 @@ static char *find_page_ws(int port, long timeout_ms) {
 
 /* ---- session -------------------------------------------------------- */
 
+#define RBL_BROWSER_LAUNCH_MS 45000L
+
 struct rbl_session {
     rbl_client *client;
     browser_proc bp;
@@ -989,14 +991,16 @@ struct rbl_session {
 };
 
 static rbl_status session_connect(rbl_session *s, bool intercept_all) {
-    s->port = read_devtools_port(&s->bp, 15000);
+    /* Generous: a cold first launch in a fresh container (font cache,
+     * profile creation) can take far longer than a warm one. */
+    s->port = read_devtools_port(&s->bp, RBL_BROWSER_LAUNCH_MS);
     if (s->port <= 0) {
         rbl_logf("browser: no DevTools port (did Chromium start?)");
         return RBL_ERR_RENDER;
     }
     rbl_logf("browser: devtools on port %d", s->port);
 
-    char *wsurl = find_page_ws(s->port, 8000);
+    char *wsurl = find_page_ws(s->port, RBL_BROWSER_LAUNCH_MS / 2);
     if (!wsurl) {
         rbl_logf("browser: no page target");
         return RBL_ERR_RENDER;

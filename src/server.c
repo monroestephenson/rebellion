@@ -456,6 +456,7 @@ static int handle_crawl(int fd, const rbl_jv *req) {
     const char *bad = opts_from_req(sopt ? sopt : req, &co.scrape);
     if (bad) return send_error(fd, 400, "bad_request", bad);
     int limit = (int)jv_long(req, "limit", 25, 1, g_cfg.crawl_cap);
+    if (limit > g_cfg.crawl_cap) limit = g_cfg.crawl_cap; /* the default, too */
     co.max_pages = limit;
     co.max_depth = (int)jv_long(req, "depth", 2, 0, 10);
     co.same_host_only = rbl_jv_get_bool(req, "sameHostOnly", true);

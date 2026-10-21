@@ -1,0 +1,102 @@
+.TH REBELLION-SERVER 1 "2026" "rebellion 0.1.0" "User Commands"
+.SH NAME
+rebellion-server \- HTTP+JSON API for the rebellion web scraper
+.SH SYNOPSIS
+.B rebellion-server
+.RI [ options ]
+.SH DESCRIPTION
+.B rebellion-server
+exposes rebellion's scrape, crawl and map operations over HTTP so that any
+service can use them. Requests and responses are JSON. One thread-safe
+scraper client serves all requests; each connection is handled on its own
+thread and carries a single request.
+.SH ENDPOINTS
+.TP
+.B GET /health
+Liveness and whether a headless browser is available. Never needs a key.
+.TP
+.B POST /v1/scrape
+Scrape one URL: \fB{"url":"https://example.de/"}\fR. Optional fields include
+\fBengine\fR (auto, http, browser), \fBonlyMainContent\fR,
+\fBincludeHtml\fR, \fBrespectRobots\fR, \fBtimeoutMs\fR, \fBscreenshot\fR and
+\fBactions\fR (click, fill, submit, wait_for, scroll, scroll_bottom, wait).
+.TP
+.B POST /v1/crawl
+Crawl one site: \fB{"url":"...","limit":25,"depth":2}\fR.
+.TP
+.B POST /v1/map
+Discover URLs from sitemaps and homepage links: \fB{"url":"..."}\fR.
+.PP
+POST bodies must be sent with \fBContent-Type: application/json\fR. Errors
+are \fB{"success":false,"code":"...","error":"..."}\fR with a matching HTTP
+status. See docs/API.md for the full reference.
+.SH OPTIONS
+.TP
+.B \-\-host \fIaddr\fR
+Bind address, IPv4 or IPv6 (default 127.0.0.1).
+.TP
+.B \-\-port \fIn\fR
+Port (default \fB$PORT\fR, else 8080).
+.TP
+.B \-\-api\-key \fIkey\fR
+Require \fBAuthorization: Bearer\fR \fIkey\fR (or \fBX\-API\-Key:\fR \fIkey\fR).
+.TP
+.B \-\-allow\-private
+Allow scraping loopback, private and link-local hosts.
+.TP
+.B \-\-cors\-origin \fIorigin\fR
+Send \fBAccess\-Control\-Allow\-Origin:\fR \fIorigin\fR. Off by default.
+.TP
+.B \-\-proxy \fIurl\fR
+Proxy URL; repeat for a rotating pool.
+.TP
+.B \-\-proxy\-strategy \fIs\fR
+\fBround\-robin\fR (default), \fBrandom\fR or \fBsticky\fR.
+.TP
+.B \-\-profile \fIdir\fR
+Persistent browser profile directory (cookies and logins persist).
+.TP
+.B \-\-max\-browsers \fIn\fR
+Concurrent headless browsers (default 4). Each costs a few hundred MB.
+.TP
+.B \-\-crawl\-cap \fIn\fR
+Maximum pages per crawl request (default 100).
+.TP
+.B \-\-max\-conns \fIn\fR
+Maximum concurrent connections (default 32); excess requests get 503.
+.TP
+.B \-\-max\-body \fIbytes\fR
+Maximum request body size (default 2097152).
+.TP
+.B \-\-quiet
+No access log.
+.TP
+.BR \-\-verbose ", " \-v
+Debug logging to stderr.
+.SH ENVIRONMENT
+.TP
+.B REBELLION_API_KEY
+API key, if \-\-api\-key is not given.
+.TP
+.B PORT
+Default port.
+.TP
+.BR REBELLION_CHROMIUM ", " CHROME_PATH
+Chromium binary to use for the browser engine.
+.SH SECURITY
+The default bind address is loopback. A loopback server without an API key
+only answers requests addressed to localhost, 127.0.0.1 or [::1]. Targets on
+loopback, private, link-local and CGNAT networks are refused unless
+\-\-allow\-private is given.
+.SH SIGNALS
+SIGTERM and SIGINT stop accepting connections and let running requests
+finish (up to 60 seconds) before exiting.
+.SH EXAMPLES
+.nf
+rebellion-server --api-key "$KEY"
+curl -sS http://127.0.0.1:8080/v1/scrape \e
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \e
+  -d '{"url":"https://www.berliner-volksbank.de/"}'
+.fi
+.SH "SEE ALSO"
+.BR rebellion (1)

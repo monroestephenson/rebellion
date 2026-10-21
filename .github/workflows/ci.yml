@@ -29,6 +29,11 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
+      - name: Show browser
+        run: |
+          ls -l /usr/bin/chromium* /usr/bin/google-chrome* 2>/dev/null || true
+          google-chrome --version 2>/dev/null || true
+
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
@@ -103,3 +108,64 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build-asan --output-on-failure
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t rebellion:ci .
+      - name: Smoke-test the container (HTTP + browser engines)
+        run: |
+          mkdir -p /tmp/site
+          printf '<html lang="de"><head><meta charset="utf-8"><title>CI</title></head><body><article><h1>Grüße aus dem Container</h1><p>Ein ausreichend langer Absatz für die Hauptinhalts-Erkennung im Container-Test, damit nichts eskaliert.</p></article></body></html>' > /tmp/site/index.html
+          python3 -m http.server 18932 --bind 127.0.0.1 --directory /tmp/site &
+          docker run -d --name rbl --network host -e PORT=18081 rebellion:ci --host 127.0.0.1 --allow-private
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:18081/health && break; sleep 1; done
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"url":"http://127.0.0.1:18932/index.html","engine":"http"}' \
+            http://127.0.0.1:18081/v1/scrape | tee /tmp/http.json
+          grep -q 'Grüße aus dem Container' /tmp/http.json
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"url":"http://127.0.0.1:18932/index.html","engine":"browser","screenshot":true}' \
+            http://127.0.0.1:18081/v1/scrape > /tmp/browser.json
+          grep -q '"engine":"browser"' /tmp/browser.json
+          grep -q 'data:image/png;base64,' /tmp/browser.json
+          docker stop rbl
+          docker logs rbl
+          test "$(docker inspect rbl --format '{{.State.ExitCode}}')" = 0
+
+  kotlin-example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libcurl4-openssl-dev
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+      - name: Build rebellion-server
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DREBELLION_BUILD_TESTS=OFF
+          cmake --build build -j
+      - name: Run the Kotlin client against a live server
+        run: |
+          mkdir -p /tmp/site
+          printf '<html lang="de"><head><title>Kotlin</title></head><body><article><h1>Hallo Kotlin</h1><p>Ein ausreichend langer Absatz für die Hauptinhalts-Erkennung, damit nichts eskaliert wird.</p><a href="/zwei.html">zwei</a></article></body></html>' > /tmp/site/index.html
+          printf '<html><body><main><p>Seite zwei mit genug Text für die Extraktion des Hauptinhalts.</p></main></body></html>' > /tmp/site/zwei.html
+          python3 -m http.server 18933 --bind 127.0.0.1 --directory /tmp/site &
+          ./build/rebellion-server --port 8080 --allow-private --api-key ci-key &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/health && break; sleep 1; done
+          cd examples/kotlin
+          REBELLION_API_KEY=ci-key gradle --no-daemon run \
+            --args="http://127.0.0.1:18933/index.html http://127.0.0.1:8080" | tee /tmp/kotlin.out
+          grep -q '^scrape: 200' /tmp/kotlin.out
+          grep -q '^crawl: 2 pages' /tmp/kotlin.out
+          grep -q 'code=bad_url' /tmp/kotlin.out

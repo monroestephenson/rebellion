@@ -3,15 +3,16 @@
 **A Firecrawl-style web scraper, written in C.**
 
 `rebellion` turns web pages into clean Markdown (plus structured metadata and
-links), from a single CLI binary and a small C library. It has two engines:
+links), from a CLI, a small C library, and an HTTP+JSON API server that any
+other service (Kotlin, Go, Python, ...) can call. It has two engines:
 
 - **HTTP engine** — a fast [libcurl](https://curl.se/libcurl/) fetch with
   HTTP/2, brotli/gzip/zstd, a cookie jar, and browser-like headers.
 - **Browser engine** — a real headless **Chromium** driven over the Chrome
-  DevTools Protocol. Because it is an actual browser, it executes JavaScript
-  and transparently clears the interstitial JS challenges that front many
-  sites (e.g. Cloudflare's "checking your browser" page), returning the live,
-  rendered DOM.
+  DevTools Protocol. It executes JavaScript, so single-page apps and pages
+  that build their content (or a "please enable JavaScript" gate) in the
+  browser render properly, and it returns the live DOM. It does not solve
+  CAPTCHAs or other bot challenges (see *Responsible use*).
 
 An **`auto`** mode fetches over HTTP first and escalates to the browser only
 when the response looks JS-gated or empty — fast by default, robust when it
@@ -46,10 +47,15 @@ needs to be.
   cookies and logins survive across runs.
 - **Proxy rotation**: a configurable proxy pool (round-robin / random /
   sticky-per-host) applied to both the HTTP and browser engines.
+- **HTTP API server** (`rebellion-server`): `/v1/scrape`, `/v1/crawl`,
+  `/v1/map` with Firecrawl-style JSON, API keys, and a Docker image — see
+  [docs/API.md](docs/API.md) and the [Kotlin client](examples/kotlin).
 - **Crawling** (same-site BFS with depth/limit and include/exclude regex) and
   **mapping** (fast URL discovery from `sitemap.xml` + homepage links).
 - **Polite by default**: obeys `robots.txt`, honors `Crawl-delay`, and
   rate-limits per host. (All overridable — see *Responsible use*.)
+- **Safe by default**: refuses loopback/private/cloud-metadata targets
+  (SSRF guard) on every redirect and every browser request.
 - Small, dependency-light: just **libcurl** and the C library's `iconv`.
 
 ## Build
@@ -65,10 +71,13 @@ cmake --build build -j
 ctest --test-dir build        # run the unit tests
 ```
 
-The binary is `build/rebellion`; the static library is `build/librebellion.a`.
+The binaries are `build/rebellion` (CLI) and `build/rebellion-server` (HTTP
+API); the static library is `build/librebellion.a`. Linux is the supported
+platform.
 
 Build options: `-DBUILD_SHARED_LIBS=ON` (shared library with SONAME),
 `-DREBELLION_BUILD_TESTS=OFF`, `-DREBELLION_BUILD_CLI=OFF`,
+`-DREBELLION_BUILD_SERVER=OFF`,
 `-DREBELLION_WERROR=ON`, `-DREBELLION_HARDEN=ON` (default: stack protector,
 `_FORTIFY_SOURCE`, RELRO/BIND_NOW), `-DREBELLION_FUZZ=ON` (see `fuzz/`).
 
@@ -93,9 +102,9 @@ target_link_libraries(myapp PRIVATE rebellion::rebellion)
 ```
 
 For the **browser engine** you also need a Chromium or Chrome binary.
-rebellion looks for it automatically (including the Playwright layout at
-`/opt/pw-browsers/chromium`); override with `$REBELLION_CHROMIUM` or
-`--browser` plus a path via `$REBELLION_CHROMIUM`.
+rebellion looks for it automatically (`chromium`, `chromium-browser`,
+`google-chrome`, and the Playwright layout at `/opt/pw-browsers/chromium`);
+point `$REBELLION_CHROMIUM` (or `$CHROME_PATH`) at a binary to choose one.
 
 ## CLI usage
 
@@ -103,7 +112,7 @@ rebellion looks for it automatically (including the Playwright layout at
 # Scrape a page to Markdown (auto engine)
 rebellion scrape https://www.vr.de
 
-# Force the headless browser (handles JS challenges / SPAs)
+# Force the headless browser (JavaScript-rendered pages / SPAs)
 rebellion scrape https://www.mediamarkt.de --browser
 
 # Structured JSON, written to a file
@@ -137,13 +146,53 @@ rebellion scrape https://example.de \
 
 Run `rebellion --help` for the full option list.
 
+## HTTP API (for other services)
+
+`rebellion-server` wraps the library in a small HTTP+JSON service, so a
+Kotlin/Java, Go, Python or Node service can scrape without linking C:
+
+```sh
+rebellion-server --api-key "$KEY"            # listens on 127.0.0.1:8080
+
+curl -sS http://127.0.0.1:8080/v1/scrape \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"url":"https://www.berliner-volksbank.de/"}'
+# {"success":true,"data":{"url":"...","statusCode":200,"engine":"http",
+#   "title":"Privatkunden - Berliner Volksbank","language":"de","markdown":"...","links":[...]}}
+```
+
+Endpoints: `POST /v1/scrape` (with optional browser `actions` and
+`screenshot`), `POST /v1/crawl`, `POST /v1/map`, `GET /health`. Errors carry
+a machine-readable `code` (`blocked`, `robots_denied`, `timeout`, `busy`,
+...). The full reference is in [docs/API.md](docs/API.md).
+
+From Kotlin, with the client in [`examples/kotlin`](examples/kotlin)
+(`java.net.http` + kotlinx.serialization, no other dependencies):
+
+```kotlin
+val client = RebellionClient("http://rebellion:8080", apiKey = System.getenv("REBELLION_API_KEY"))
+val doc = client.scrape(ScrapeRequest("https://www.volksbank.de/"))
+println("${doc.title}: ${doc.markdown.length} chars of Markdown")
+```
+
+### Docker
+
+```sh
+docker build -t rebellion .
+docker run --rm -p 8080:8080 -e REBELLION_API_KEY=change-me rebellion
+```
+
+The image (Debian slim + Chromium, ~300 MB compressed) runs the server as an
+unprivileged user under `tini`, listens on `$PORT` (default 8080) and has a
+`/health` healthcheck.
+
 ### Engines
 
 | Mode              | Flag        | What it does                                        |
 |-------------------|-------------|-----------------------------------------------------|
 | `auto` (default)  | `--engine auto` | HTTP first; escalate to the browser if gated/empty |
 | `http`            | `--http`    | libcurl only — fastest, no JavaScript               |
-| `browser`         | `--browser` | headless Chromium — executes JS, clears JS gates    |
+| `browser`         | `--browser` | headless Chromium — executes JavaScript              |
 
 ## Library usage
 
@@ -173,10 +222,10 @@ int main(void) {
 }
 ```
 
-Compile and link:
+Compile and link against the build tree:
 
 ```sh
-cc my.c -Ibuild/../include -Lbuild -lrebellion -lcurl -o my
+cc my.c -Iinclude -Lbuild -lrebellion -lcurl -lpthread -o my
 ```
 
 See [`examples/`](examples/) for a complete program, and
@@ -247,17 +296,40 @@ at once, but distinct calls returning distinct docs are fine.)
 
 **Security / SSRF.** By default rebellion refuses to fetch loopback, private
 (RFC1918 / ULA), link-local (including the `169.254.169.254` cloud-metadata
-address), CGNAT and unspecified/multicast targets — covering both literal
-hosts and DNS names that resolve into those ranges (`RBL_ERR_BLOCKED`).
+address), CGNAT and unspecified/multicast targets — covering literal hosts
+(including spellings like `127.1` or `localhost.`), DNS names that resolve
+into those ranges, every redirect hop, and every request the headless
+browser makes (`RBL_ERR_BLOCKED`).
 Transfers are restricted to `http`/`https` so a redirect cannot pivot to
 `file://`. TLS verification is always on. Set `allow_private_networks`
 (`--allow-private`) to scrape internal hosts you control. See
 [SECURITY.md](SECURITY.md).
 
-**Resource bounds.** Response bodies and WebSocket frames are capped at
-256 MiB and parser nesting is bounded, so hostile input can't exhaust memory
-or blow the stack. Per-request and connect timeouts, redirect caps and
-transient-failure retries with backoff are all configurable.
+**Resource bounds.** Response bodies are capped (`max_response_bytes`,
+default 32 MiB → `RBL_ERR_TOO_LARGE`), DevTools frames are bounded, and
+parser nesting is limited, so hostile input can't exhaust memory or blow the
+stack. Binary responses (PDF, images) are rejected with
+`RBL_ERR_UNSUPPORTED_CONTENT` instead of being parsed. Per-request and
+connect timeouts, redirect caps and transient-failure retries with backoff
+are configurable.
+
+**Browsers and memory.** At most `max_concurrent_browsers` (default 4)
+headless Chromium instances run at once per client; further requests wait
+and then fail with `RBL_ERR_BUSY`. Each browser is started under a tiny
+supervisor process that kills it (and removes its throwaway profile) if your
+process exits or crashes, so no orphaned Chromium is left behind.
+
+**How much RAM does it use?** Measured on Linux x86-64:
+
+| What                                          | Memory |
+|-----------------------------------------------|--------|
+| `rebellion-server`, idle                      | ~13 MB RSS |
+| `rebellion-server`, 16 concurrent HTTP scrapes | < 30 MB RSS peak |
+| one headless Chromium render (Volksbank homepage) | ~325 MB PSS (heavy pages: up to ~700 MB) |
+| browser supervisor                            | ~1 MB |
+
+So the HTTP engine is nearly free, and memory is dominated by browsers: plan
+for roughly `50 MB + max_browsers × 500 MB`.
 
 ## Responsible use
 
@@ -268,9 +340,10 @@ and archiving within the law.
 - `robots.txt` is **respected by default**. `--no-robots` exists for cases
   where you have permission that the file does not express (e.g. your own
   staging site); use it deliberately.
-- The browser engine clears *automated interstitial JS challenges* the way
-  any real browser does; it does **not** solve CAPTCHAs, defeat login walls,
-  or bypass access controls, and you should not use it to.
+- The browser engine renders pages the way a normal browser does; it does
+  **not** solve CAPTCHAs or bot challenges, defeat login walls, or bypass
+  access controls, and you should not use it to. If a site blocks automated
+  access, ask the operator for access or an API.
 - Be polite: keep the default per-host delay (or raise it with `--delay`),
   honor `Crawl-delay`, and don't hammer a site.
 - Respect each site's terms of service, applicable law (incl. the GDPR for
@@ -282,8 +355,10 @@ and archiving within the law.
 include/rebellion/rebellion.h   public API
 src/
   util.c        buffers, string helpers, hash set, base64, timing
-  client.c      client lifecycle, Chromium detection, rate limiting
+  client.c      client lifecycle, Chromium detection, rate limiting,
+                proxy pool, browser concurrency gate
   url.c         URL parse/resolve (libcurl URL API)
+  net.c         SSRF guard: private-address classification
   charset.c     charset detection + iconv conversion to UTF-8
   entities.c    HTML entity decoding → UTF-8
   html.c        tokenizer + forgiving DOM tree builder
@@ -293,10 +368,17 @@ src/
   browser.c     headless Chromium via DevTools Protocol (raw-socket WS)
   robots.c      robots.txt fetch/parse/eval + crawl-delay
   json.c        JSON escaping + shallow parsing
+  jsonval.c     JSON parser for API requests
   scrape.c      orchestration, rbl_doc, JSON serialization
   crawl.c       crawl (BFS) + map (sitemap/link discovery)
   main.c        CLI
-tests/          unit tests (markdown, charset, entities, url, robots, html)
+  server.c      rebellion-server (HTTP+JSON API)
+tests/          unit + hermetic end-to-end tests (local origin and proxy),
+                server_smoke.sh for the API
+fuzz/           libFuzzer targets (HTML/charset/links, JSON, robots.txt)
+examples/       C library example, Kotlin API client
+docs/           API reference, architecture, man pages
+Dockerfile      rebellion-server + Chromium image
 ```
 
 ## License
